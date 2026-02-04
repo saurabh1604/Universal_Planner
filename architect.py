@@ -4,14 +4,19 @@ import pandas as pd
 from rapidfuzz import process, fuzz
 
 class GenericArchitect:
-    def __init__(self, api_key):
-        self.client = openai.OpenAI(api_key=api_key)
+    def __init__(self, api_key, mock_mode=False):
+        self.mock_mode = mock_mode
+        self.client = None
+        if api_key and not mock_mode:
+            self.client = openai.OpenAI(api_key=api_key)
 
     def generate_cdl(self, user_input, data_passport, df=None):
         """
         Translates NL -> Strict Mathematical CDL -> Validates Values
         """
-        
+        if self.mock_mode or not self.client:
+            return self._mock_generate_cdl(user_input), None
+
         # 1. THE STRICT SYSTEM PROMPT
         system_prompt = f"""
         You are the CDL Architect. Convert Natural Language into a STRICT Recursive Mathematical Expression Tree.
@@ -68,6 +73,29 @@ class GenericArchitect:
 
         except Exception as e:
             return None, str(e)
+
+    def _mock_generate_cdl(self, user_input):
+        """
+        Returns a dummy CDL for testing.
+        """
+        # Simple heuristic to make it look responsive
+        desc = f"Mock Constraint: {user_input}"
+        rule_type = "mock_rule_" + str(hash(user_input) % 1000)
+
+        return {
+            "rule_type": rule_type,
+            "description": desc,
+            "params": {
+                "scope": { "type": "GLOBAL" },
+                "expression": {
+                    "operator": "<=",
+                    "operands": [
+                        { "variable": "MOCK_VARIABLE" },
+                        100
+                    ]
+                }
+            }
+        }
 
     def _validate_values(self, cdl_json, df):
         """
