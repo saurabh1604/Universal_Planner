@@ -1,98 +1,83 @@
 # Universal Migration Planner - System Architecture
 
-This document details the 3-Layer Architecture of the Universal Migration Planner (UAMP), reflecting the final implementation of the Agentic Middleware, Chat Interface, and Solver integration.
+This document outlines the **Logical Architecture** of the Universal Migration Planner (UAMP). It illustrates how human intent is transformed into mathematical execution through an intelligent, schema-aware middleware layer.
 
-## High-Level Data Flow
+## The 3-Layer Logic Flow
 
 ```mermaid
-graph TD
-    %% User Inputs
-    User([User]) -->|Uploads CSV| UI[Streamlit UI]
-    User -->|Configures Date| UI
-    User -->|Natural Language Prompt| Chat[Chat Interface]
+graph LR
+    %% STYLING
+    classDef user fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef context fill:#fff3e0,stroke:#e65100,stroke-width:2px;
+    classDef intelligence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;
+    classDef execution fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
 
-    %% Layer 1: Schema Profiler
-    subgraph "Layer 1: The Schema Profiler"
-        UI -->|Raw Data| Profiler[Schema Engine]
-        Profiler -->|Generates| Passport[Data Passport]
-        Passport -.->|Context Injection| Auditor
-        Passport -.->|Context Injection| Architect
+    %% -----------------------------
+    %% ZONE 1: INPUT & CONTEXT
+    %% -----------------------------
+    subgraph "Zone 1: Input & Reality"
+        direction TB
+        User([User]):::user
+        RawData[(Raw CSV)]:::context
+
+        Profiler[Schema Engine]:::context
+        Passport[Data Passport]:::context
+
+        User -->|Uploads| RawData
+        RawData -->|Scans| Profiler
+        Profiler -->|Generates| Passport
     end
 
-    %% Layer 2: Agentic Middleware
-    subgraph "Layer 2: Agentic Middleware"
-        Chat -->|User Message + History| Auditor[Auditor Agent]
+    %% -----------------------------
+    %% ZONE 2: INTELLIGENT MIDDLEWARE
+    %% -----------------------------
+    subgraph "Zone 2: The Agentic Brain"
+        direction TB
+        Chat[Chat Interface]:::intelligence
+        Auditor[Auditor Agent]:::intelligence
+        Architect[Architect Agent]:::intelligence
+        Rules[(Constraint Store)]:::intelligence
 
-        %% Auditor Logic
-        Auditor -->|Checks| Checks{Validation}
-        Checks -->|Hallucination/Logic/Ambiguity| Fail[Fail / Clarification]
-        Fail -->|Question/Error| Chat
-        Chat -.->|Reply/Clarification| Auditor
+        User -->|Natural Language| Chat
+        Passport -.->|Injects Reality| Auditor
+        Passport -.->|Injects Reality| Architect
 
-        %% Architect Logic
-        Checks -->|PASS| Architect[Architect Agent]
-        Architect -->|Generates| CDL[CDL JSON]
-
-        %% JIT Validation
-        Architect -->|Validates Values against Data| JIT{JIT Validation}
-        JIT -->|Invalid Value| Chat
-        JIT -->|Valid| Store[Constraint Store]
+        %% The Interaction Loop
+        Chat <-->|Validation Loop| Auditor
+        Auditor -->|Approved Request| Architect
+        Architect -->|Generates CDL| Rules
     end
 
-    %% Layer 3: Universal Solver
-    subgraph "Layer 3: Universal Solver"
-        Store -->|Accumulated CDL| Solver[Google OR-Tools Solver]
-        UI -->|Raw Data| Solver
-        Solver -->|Optimizes| Schedule[Final Schedule CSV]
+    %% -----------------------------
+    %% ZONE 3: EXECUTION CORE
+    %% -----------------------------
+    subgraph "Zone 3: Mathematical Execution"
+        direction TB
+        Solver[Universal Solver]:::execution
+        Schedule[Optimized Schedule]:::execution
+
+        Rules -->|CDL Instructions| Solver
+        RawData -->|Data Input| Solver
+        Solver -->|Calculates| Schedule
     end
 
-    %% Visuals
-    Store -.->|Display Active Rules| UI
-    Schedule -.->|Download/Visualize| UI
+    %% FEEDBACK
+    Schedule -.->|Visualize| User
 ```
 
-## Detailed Component Interaction
+## Core Components
 
-### 1. Data Ingestion & Profiling
-*   **Input**: User uploads a CSV file (any schema).
-*   **Process**: `SchemaEngine.generate_passport(df)` scans the data.
-    *   **Categorical**: Lists unique values if cardinality < 50 (e.g., Regions).
-    *   **Numeric**: Identifies Min/Max ranges (e.g., DB_SIZE).
-*   **Output**: The **Data Passport** string, which anchors all LLM agents to the "Physical Reality" of the dataset.
+### 1. Context Engine (The "Eyes")
+*   **Purpose**: To ground the LLM in reality.
+*   **Mechanism**: The **Schema Engine** profiles the uploaded data, creating a **Data Passport** (summary of columns, ranges, and unique values).
+*   **Benefit**: Prevents hallucinations by ensuring agents only reference columns and values that actually exist.
 
-### 2. The Agentic Middleware (Chat Loop)
-The core interaction happens in `app.py`, orchestrating two agents:
+### 2. Intelligent Middleware (The "Brain")
+*   **The Auditor**: A gatekeeper that ensures requests are logical and unambiguous.
+    *   *Example*: Fails "Start in Jan 2025" if "Blackout Jan 2025" exists.
+*   **The Architect**: A translator that converts approved English requests into **Constraint Definition Language (CDL)**.
+    *   *Feature*: Uses "Few-Shot Learning" to construct complex nested logic (e.g., `IMPLIES`, `AND`) and maps relative dates (e.g., "Next Month") to absolute indices.
 
-#### A. The Auditor (`auditor.py`)
-*   **Role**: Gatekeeper. Prevents invalid or ambiguous requests from reaching the Architect.
-*   **Inputs**:
-    *   User Input
-    *   Data Passport (Reality)
-    *   Existing Constraints (Rules)
-    *   Chat History (Context)
-    *   Plan Start Date (Time Anchor)
-*   **Checks**:
-    1.  **Hallucination**: "Select column 'Unicorn'" -> FAIL (Column doesn't exist).
-    2.  **Logic**: "Start Jan 2026" vs "Blackout Jan 2026" -> FAIL (Contradiction).
-    3.  **Ambiguity**: "Move large ones" -> CLARIFICATION_NEEDED ("Define 'large'?").
-*   **The Loop**: If clarification is needed, the Auditor asks a question. The user's reply is fed back into the Auditor *with the chat history*, allowing it to resolve the ambiguity.
-
-#### B. The Architect (`architect.py`)
-*   **Role**: Translator. Converts validated intent into strict CDL.
-*   **Inputs**: Same as Auditor.
-*   **Process**:
-    *   **Context Awareness**: Uses history to merge original intent with clarifications.
-    *   **Date Calculation**: Maps relative dates ("Jan 2027") to integer indices based on `Plan Start Date`.
-    *   **Grammar Enforcement**: Uses Few-Shot examples to generate nested CDL (`IMPLIES`, `AND`) and generic Solver functions (`ALL_MEMBERS_HAVE_SAME_VALUE`).
-    *   **JIT Validation**: Before returning, checks generated values against the DataFrame (using `rapidfuzz` for fuzzy matching) to catch any remaining hallucinations.
-
-### 3. The Universal Solver (`solver.py`)
-*   **Role**: Execution Engine.
-*   **Mechanism**: Google OR-Tools (CP-SAT).
-*   **Integration**:
-    *   Receives the generic CDL JSON.
-    *   Maps CDL buckets (Filtering, Temporal, Aggregation, Cohesion) to CP-SAT constraints.
-    *   **Generic Functions**:
-        *   `ALL_MEMBERS_HAVE_SAME_VALUE`: Enforces group cohesion.
-        *   `GET_POD_COUNT_FOR_MONTH`: Enforces global capacity limits.
-*   **Output**: An optimized schedule respecting all constraints.
+### 3. Execution Core (The "Hands")
+*   **Universal Solver**: A Google OR-Tools (CP-SAT) engine.
+*   **Mechanism**: It is "blind" to business logic. It simply executes the mathematical instructions (CDL) generated by the Architect against the raw data.
