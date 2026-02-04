@@ -12,18 +12,35 @@ class GenericArchitect:
         else:
              self.client = openai.OpenAI(api_key=key)
 
-    def generate_cdl(self, user_input, data_passport, df=None):
+    def generate_cdl(self, user_input, data_passport, df=None, chat_history=None):
         """
         Translates NL -> Strict Mathematical CDL -> Validates Values
         """
         if not self.client:
              return None, "OpenAI API Key is missing. Please set HARDCODED_API_KEY in app.py or OPENAI_API_KEY env var."
 
+        # Format chat history
+        history_context = ""
+        if chat_history:
+            # Last few turns
+            relevant_history = chat_history[-6:]
+            history_context = "\n### CONVERSATION HISTORY (For Context):\n"
+            for msg in relevant_history:
+                role = msg.get("role", "unknown")
+                content = msg.get("content", "")
+                history_context += f"- {role.upper()}: {content}\n"
+
+            history_context += "\nIMPORTANT: Use the HISTORY to understand if the user is clarifying an earlier ambiguous term (e.g. defining 'Large' size). Combine the original intent with the clarification."
+
         # 1. THE STRICT SYSTEM PROMPT
         system_prompt = f"""
         You are the CDL Architect. Convert Natural Language into a STRICT Recursive Mathematical Expression Tree.
         
         {data_passport}
+
+        ### VIRTUAL VARIABLES (Known to Solver)
+        - **AssignedMonth** (Integer): The target month index for scheduling.
+        - **Plan Start Date**: Dec 2025 is Month 12. Jan 2026 is Month 13. Jan 2027 is Month 25.
 
         ### GRAMMAR RULES (The 4 Primitive Buckets)
         1. **Filtering** (Where): {{ "operator": "==", "operands": [{{ "variable": "REGION" }}, "PHX"] }}
@@ -47,9 +64,43 @@ class GenericArchitect:
             }}
         }}
 
+        ### FEW-SHOT EXAMPLES (LEARN THE STRUCTURE)
+
+        Example 1: "Start large DBs (between 1.5TB and 3TB) from Month 12"
+        {{
+          "rule_type": "db_size_start_months",
+          "params": {{
+            "expression": {{
+              "operator": "IMPLIES",
+              "operands": [
+                {{
+                  "operator": "==",
+                  "operands": [ {{ "variable": "DB_SIZE" }}, ">1.5TB & <3TB" ]
+                }},
+                {{
+                  "operator": ">=",
+                  "operands": [ {{ "variable": "AssignedMonth" }}, 12 ]
+                }}
+              ]
+            }}
+          }}
+        }}
+
+        Example 2: "Limit pods to 200 per Exadata per month"
+        {{
+          "rule_type": "group_concurrency_limit",
+          "params": {{
+            "limit": 200,
+            "group_columns": ["Exadata Name"]
+          }}
+        }}
+
         ### CRITICAL INSTRUCTIONS
         - Map user terms (e.g., "Tiny") to Schema Values (e.g., "<1.5TB").
-        - DO NOT use high-level functions like "Groupby_Pods". Use primitives.
+        - If the user defines a condition (e.g. "Large DBs") and a timeframe (e.g. "Start Jan 2027"), use the IMPLIES operator: (Condition) IMPLIES (Timeframe).
+        - Calculate Month Indices relative to Dec 2025 = 12.
+
+        {history_context}
         """
 
         # 2. CALL LLM
@@ -105,6 +156,10 @@ class GenericArchitect:
                 
                 # VALIDATE
                 if col_name and target_vals:
+                    # Skip validation for Virtual Variables like AssignedMonth
+                    if col_name in ["AssignedMonth", "CURRENT_MONTH"]:
+                        return None
+
                     if col_name not in df.columns:
                         return f"Column '{col_name}' not found in data."
                     

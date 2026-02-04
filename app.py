@@ -121,7 +121,8 @@ if 'df' in st.session_state:
                         cdl, error = architect.generate_cdl(
                             prompt,
                             st.session_state.passport,
-                            st.session_state.df
+                            st.session_state.df,
+                            st.session_state.messages # Pass history
                         )
                         
                         if error:
