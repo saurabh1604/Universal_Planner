@@ -5,6 +5,7 @@ from architect import GenericArchitect
 from auditor import Auditor
 import json
 import os
+from datetime import date
 
 # --- HARDCODED CONFIGURATION ---
 HARDCODED_API_KEY = "" 
@@ -27,6 +28,12 @@ if "messages" not in st.session_state:
 with st.sidebar:
     st.header("Configuration")
     
+    # 1. Add Plan Start Date Configuration
+    st.subheader("Plan Parameters")
+    # Default to a future date or current month. Jan 1, 2025 as per user example scenario
+    plan_start_date = st.date_input("Plan Start Date (Month 1)", value=date(2025, 1, 1))
+
+    st.divider()
     st.header("Data Ingestion")
     uploaded_file = st.file_uploader("Upload CSV (Any Schema)", type="csv")
     
@@ -109,7 +116,8 @@ if 'df' in st.session_state:
                         prompt,
                         st.session_state.passport, 
                         st.session_state.constraints,
-                        st.session_state.messages # Pass history
+                        st.session_state.messages, # Pass history
+                        plan_start_date=str(plan_start_date) # Pass configured date
                     )
 
                 # 3. Handle Result
@@ -122,7 +130,8 @@ if 'df' in st.session_state:
                             prompt,
                             st.session_state.passport,
                             st.session_state.df,
-                            st.session_state.messages # Pass history
+                            st.session_state.messages, # Pass history
+                            plan_start_date=str(plan_start_date) # Pass configured date
                         )
                         
                         if error:

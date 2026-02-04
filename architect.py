@@ -12,7 +12,7 @@ class GenericArchitect:
         else:
              self.client = openai.OpenAI(api_key=key)
 
-    def generate_cdl(self, user_input, data_passport, df=None, chat_history=None):
+    def generate_cdl(self, user_input, data_passport, df=None, chat_history=None, plan_start_date=None):
         """
         Translates NL -> Strict Mathematical CDL -> Validates Values
         """
@@ -32,6 +32,11 @@ class GenericArchitect:
 
             history_context += "\nIMPORTANT: Use the HISTORY to understand if the user is clarifying an earlier ambiguous term (e.g. defining 'Large' size). Combine the original intent with the clarification."
 
+        # Plan Start Date Context
+        start_date_context = "- **Plan Start Date**: Dec 2025 is Month 12. Jan 2026 is Month 13. Jan 2027 is Month 25. (DEFAULT)"
+        if plan_start_date:
+            start_date_context = f"- **Plan Start Date (Month 1)**: {plan_start_date}. Calculate all relative Month Indices based on this anchor."
+
         # 1. THE STRICT SYSTEM PROMPT
         system_prompt = f"""
         You are the CDL Architect. Convert Natural Language into a STRICT Recursive Mathematical Expression Tree.
@@ -40,7 +45,7 @@ class GenericArchitect:
 
         ### VIRTUAL VARIABLES (Known to Solver)
         - **AssignedMonth** (Integer): The target month index for scheduling.
-        - **Plan Start Date**: Dec 2025 is Month 12. Jan 2026 is Month 13. Jan 2027 is Month 25.
+        {start_date_context}
 
         ### GRAMMAR RULES (The 4 Primitive Buckets)
         1. **Filtering** (Where): {{ "operator": "==", "operands": [{{ "variable": "REGION" }}, "PHX"] }}
@@ -98,7 +103,7 @@ class GenericArchitect:
         ### CRITICAL INSTRUCTIONS
         - Map user terms (e.g., "Tiny") to Schema Values (e.g., "<1.5TB").
         - If the user defines a condition (e.g. "Large DBs") and a timeframe (e.g. "Start Jan 2027"), use the IMPLIES operator: (Condition) IMPLIES (Timeframe).
-        - Calculate Month Indices relative to Dec 2025 = 12.
+        - Calculate Month Indices relative to the Plan Start Date defined above.
 
         {history_context}
         """

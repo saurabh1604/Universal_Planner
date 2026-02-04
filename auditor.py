@@ -14,7 +14,7 @@ class Auditor:
         else:
              self.client = openai.OpenAI(api_key=key)
 
-    def audit_request(self, user_input, data_passport, existing_constraints, chat_history=None):
+    def audit_request(self, user_input, data_passport, existing_constraints, chat_history=None, plan_start_date=None):
         """
         Analyzes the request for Hallucinations, Logic Conflicts, and Ambiguity.
         Returns: (status, message)
@@ -34,11 +34,18 @@ class Auditor:
                 content = msg.get("content", "")
                 history_context += f"- {role.upper()}: {content}\n"
 
+        # Plan Start Date Context
+        start_date_context = ""
+        if plan_start_date:
+            start_date_context = f"\n### PLAN CONTEXT:\n- Plan Start Date (Month 1): {plan_start_date}\n- Calculate logic conflicts based on this timeline."
+
         system_prompt = f"""
         You are the Auditor Agent. Your job is to validate user requests before they are turned into code.
 
         ### DATA PASSPORT (The Reality):
         {data_passport}
+
+        {start_date_context}
 
         ### EXISTING CONSTRAINTS (The Rules):
         {json.dumps(existing_constraints, indent=2)}
