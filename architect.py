@@ -1,17 +1,24 @@
 import openai
 import json
 import pandas as pd
+import os
 from rapidfuzz import process, fuzz
 
 class GenericArchitect:
-    def __init__(self, api_key):
-        self.client = openai.OpenAI(api_key=api_key)
+    def __init__(self, api_key=None):
+        key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not key:
+             self.client = None
+        else:
+             self.client = openai.OpenAI(api_key=key)
 
     def generate_cdl(self, user_input, data_passport, df=None):
         """
         Translates NL -> Strict Mathematical CDL -> Validates Values
         """
-        
+        if not self.client:
+             return None, "OpenAI API Key is missing. Please set HARDCODED_API_KEY in app.py or OPENAI_API_KEY env var."
+
         # 1. THE STRICT SYSTEM PROMPT
         system_prompt = f"""
         You are the CDL Architect. Convert Natural Language into a STRICT Recursive Mathematical Expression Tree.
