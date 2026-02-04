@@ -45,6 +45,7 @@ class GenericArchitect:
 
         ### VIRTUAL VARIABLES (Known to Solver)
         - **AssignedMonth** (Integer): The target month index for scheduling.
+        - **CURRENT_MONTH** (Integer): Loop variable for 'for_each_month' logic.
         {start_date_context}
 
         ### GRAMMAR RULES (The 4 Primitive Buckets)
@@ -55,6 +56,23 @@ class GenericArchitect:
            - Args: ["count" OR "COLUMN_NAME", Filter_Expression_OR_null]
         4. **Scope** (Grouping):
            - If user says "Per Exadata" or "Per Region", use "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["Exadata_Name"] }}
+
+        ### ADVANCED SOLVER FUNCTIONS (Use these for specific logic)
+        The Solver explicitly supports these high-level functions. Prefer them over complex primitives where possible:
+        1. **Cohesion / Grouping**:
+           - Function: `ALL_MEMBERS_HAVE_SAME_VALUE`
+           - Usage: Ensure all items in a group share the same AssignedMonth.
+           - Example: {{ "function": "ALL_MEMBERS_HAVE_SAME_VALUE", "arguments": [{{ "group_by": "FAMILY_NAME" }}, "AssignedMonth"] }}
+
+        2. **Global Capacity / Ramp-up**:
+           - Function: `GET_POD_COUNT_FOR_MONTH`
+           - Usage: Check total capacity in a specific month.
+           - Example: {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [15] }} <= 500
+
+        3. **Iterative Logic**:
+           - Key: `for_each_month`
+           - Usage: Apply a rule to every month in the horizon.
+           - Example: {{ "for_each_month": {{}}, "rule": {{ "operator": "IMPLIES", "operands": [ {{ "operator": "==", "operands": [ {{ "variable": "CURRENT_MONTH" }}, 12 ] }}, ... ] }} }}
 
         ### STRICT JSON OUTPUT FORMAT
         {{
@@ -100,10 +118,45 @@ class GenericArchitect:
           }}
         }}
 
+        Example 3: "All pods in a 'single_cohort' family must move together in the same month"
+        {{
+          "rule_type": "single_cohort_cohesion",
+          "params": {{
+            "expression": {{
+              "operator": "IMPLIES",
+              "operands": [
+                {{ "operator": "==", "operands": [{{ "variable": "TypeF" }}, "single_cohort"] }},
+                {{
+                   "function": "ALL_MEMBERS_HAVE_SAME_VALUE",
+                   "arguments": [
+                     {{ "group_by": "FAMILY_NAME" }},
+                     "AssignedMonth"
+                   ]
+                }}
+              ]
+            }}
+          }}
+        }}
+
+        Example 4: "Max 500 pods in Month 15"
+        {{
+          "rule_type": "capacity_limit_m15",
+          "params": {{
+            "expression": {{
+              "operator": "<=",
+              "operands": [
+                {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [15] }},
+                500
+              ]
+            }}
+          }}
+        }}
+
         ### CRITICAL INSTRUCTIONS
         - Map user terms (e.g., "Tiny") to Schema Values (e.g., "<1.5TB").
         - If the user defines a condition (e.g. "Large DBs") and a timeframe (e.g. "Start Jan 2027"), use the IMPLIES operator: (Condition) IMPLIES (Timeframe).
         - Calculate Month Indices relative to the Plan Start Date defined above.
+        - **PRIORITIZE** Advanced Solver Functions (`ALL_MEMBERS_HAVE_SAME_VALUE`, `GET_POD_COUNT_FOR_MONTH`) over complex arithmetic workarounds.
 
         {history_context}
         """
@@ -185,6 +238,12 @@ class GenericArchitect:
                 if isinstance(arg, dict):
                     err = recursive_check(arg)
                     if err: return err
+            # Also recurse into function arguments
+            if "arguments" in node:
+                for arg in node["arguments"]:
+                    if isinstance(arg, dict):
+                         err = recursive_check(arg)
+                         if err: return err
             return None
 
         return recursive_check(expr)
