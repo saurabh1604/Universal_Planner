@@ -2,82 +2,82 @@
 
 This document outlines the **Logical Architecture** of the Universal Migration Planner (UAMP). It illustrates how human intent is transformed into mathematical execution through an intelligent, schema-aware middleware layer.
 
-## The 3-Layer Logic Flow
+## The Vision: Production Architecture (DevOps Integration)
+
+While the PoC utilizes a local Streamlit interface, the target architecture integrates directly into the **DevOps Portal**, leveraging **Object Storage** for secure data handling.
 
 ```mermaid
 graph LR
     %% STYLING
-    classDef user fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
-    classDef context fill:#fff3e0,stroke:#e65100,stroke-width:2px;
-    classDef intelligence fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px;
-    classDef execution fill:#f3e5f5,stroke:#4a148c,stroke-width:2px;
+    classDef portal fill:#e3f2fd,stroke:#1565c0,stroke-width:2px;
+    classDef storage fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
+    classDef brain fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+    classDef solver fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px;
 
     %% -----------------------------
-    %% ZONE 1: INPUT & CONTEXT
+    %% ZONE 1: USER & DATA LAYER
     %% -----------------------------
-    subgraph "Zone 1: Input & Reality"
+    subgraph "Zone 1: The Environment"
         direction TB
-        User([User]):::user
-        RawData[(Raw CSV)]:::context
+        DevOps([DevOps User]):::portal
+        Portal[DevOps UI / Console]:::portal
+        ObjStore[(Object Storage)]:এরstorage
 
-        Profiler[Schema Engine]:::context
-        Passport[Data Passport]:::context
-
-        User -->|Uploads| RawData
-        RawData -->|Scans| Profiler
-        Profiler -->|Generates| Passport
+        DevOps -->|NL Prompt| Portal
+        Portal -.->|Fetch Data| ObjStore
     end
 
     %% -----------------------------
     %% ZONE 2: INTELLIGENT MIDDLEWARE
     %% -----------------------------
-    subgraph "Zone 2: The Agentic Brain"
+    subgraph "Zone 2: Agentic Middleware (The Brain)"
         direction TB
-        Chat[Chat Interface]:::intelligence
-        Auditor[Auditor Agent]:::intelligence
-        Architect[Architect Agent]:::intelligence
-        Rules[(Constraint Store)]:::intelligence
+        Profiler[Schema Profiler]:::brain
+        Auditor[Auditor Agent]:::brain
+        Architect[Architect Agent]:::brain
 
-        User -->|Natural Language| Chat
-        Passport -.->|Injects Reality| Auditor
-        Passport -.->|Injects Reality| Architect
+        %% Data Flow
+        ObjStore -->|Raw CSV/Parquet| Profiler
+        Profiler -->|Data Passport| Auditor
+        Profiler -->|Data Passport| Architect
 
-        %% The Interaction Loop
-        Chat <-->|Validation Loop| Auditor
+        %% Chat Loop
+        Portal <-->|Validation Loop| Auditor
         Auditor -->|Approved Request| Architect
-        Architect -->|Generates CDL| Rules
+        Architect -->|Generates CDL| SolverInput(CDL JSON):::brain
     end
 
     %% -----------------------------
     %% ZONE 3: EXECUTION CORE
     %% -----------------------------
-    subgraph "Zone 3: Mathematical Execution"
+    subgraph "Zone 3: Execution Engine"
         direction TB
-        Solver[Universal Solver]:::execution
-        Schedule[Optimized Schedule]:::execution
+        Solver[Universal Solver]:::solver
+        Result[Optimized Schedule]:::solver
 
-        Rules -->|CDL Instructions| Solver
-        RawData -->|Data Input| Solver
-        Solver -->|Calculates| Schedule
+        SolverInput --> Solver
+        ObjStore -->|Source Data| Solver
+        Solver -->|Compute| Result
     end
 
     %% FEEDBACK
-    Schedule -.->|Visualize| User
+    Result -->|Visualization| Portal
 ```
 
-## Core Components
+## Component Roles
 
-### 1. Context Engine (The "Eyes")
-*   **Purpose**: To ground the LLM in reality.
-*   **Mechanism**: The **Schema Engine** profiles the uploaded data, creating a **Data Passport** (summary of columns, ranges, and unique values).
-*   **Benefit**: Prevents hallucinations by ensuring agents only reference columns and values that actually exist.
+### 1. The Environment (DevOps & Storage)
+*   **DevOps UI**: The interaction point. Users type natural language constraints directly into the portal they use for deployment.
+*   **Object Storage**: The single source of truth for pod data (CSV/Parquet), ensuring security and scalability.
 
-### 2. Intelligent Middleware (The "Brain")
-*   **The Auditor**: A gatekeeper that ensures requests are logical and unambiguous.
-    *   *Example*: Fails "Start in Jan 2025" if "Blackout Jan 2025" exists.
-*   **The Architect**: A translator that converts approved English requests into **Constraint Definition Language (CDL)**.
-    *   *Feature*: Uses "Few-Shot Learning" to construct complex nested logic (e.g., `IMPLIES`, `AND`) and maps relative dates (e.g., "Next Month") to absolute indices.
+### 2. Intelligent Middleware (The Brain)
+*   **Schema Profiler**: Dynamically scans data from Object Storage to create a **Data Passport**. This ensures the agents understand the *current* state of the infrastructure (e.g., specific Exadata names, current utilization).
+*   **Auditor Agent**: The "Safety Valve". It validates prompts against the Data Passport and existing DevOps rules (e.g., "Blackout Periods").
+    *   *Action*: Rejects hallucinations or ambiguous requests before they trigger expensive computations.
+*   **Architect Agent**: The "Translator". Converts the validated prompt into the mathematical **Constraint Definition Language (CDL)**.
 
-### 3. Execution Core (The "Hands")
-*   **Universal Solver**: A Google OR-Tools (CP-SAT) engine.
-*   **Mechanism**: It is "blind" to business logic. It simply executes the mathematical instructions (CDL) generated by the Architect against the raw data.
+### 3. Execution Engine (The Hands)
+*   **Universal Solver**: A "blind" CP-SAT engine. It accepts:
+    1.  **Data** (from Object Storage)
+    2.  **Logic** (CDL from the Architect)
+*   It computes the optimal schedule without needing to understand the business intent, only the mathematical constraints.
