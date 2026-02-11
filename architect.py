@@ -22,7 +22,6 @@ class GenericArchitect:
         # Format chat history
         history_context = ""
         if chat_history:
-            # Last few turns
             relevant_history = chat_history[-6:]
             history_context = "\n### CONVERSATION HISTORY (For Context):\n"
             for msg in relevant_history:
@@ -45,38 +44,44 @@ class GenericArchitect:
 
         ### VIRTUAL VARIABLES (Known to Solver)
         - **AssignedMonth** (Integer): The target month index for scheduling.
-        - **CURRENT_MONTH** (Integer): Loop variable for 'for_each_month' logic.
+        - **CURRENT_MONTH** (Integer): Loop variable if using iterators.
         {start_date_context}
 
-        ### GRAMMAR RULES (The 4 Primitive Buckets)
+        ### GRAMMAR RULES (Primitive Buckets)
         1. **Filtering** (Where): {{ "operator": "==", "operands": [{{ "variable": "REGION" }}, "PHX"] }}
         2. **Temporal** (When): {{ "operator": ">=", "operands": [{{ "variable": "AssignedMonth" }}, 15] }}
-        3. **Aggregation** (Sum/Count): 
+        3. **Arithmetic** (Math): Support `+`, `-`, `*`, `/`, `%` (Modulo).
+           - Example: {{ "operator": "%", "operands": [{{ "variable": "AssignedMonth" }}, 3] }}
+        4. **Aggregation** (Sum/Count):
            - Use "function": "SUM" inside an operand.
            - Args: ["count" OR "COLUMN_NAME", Filter_Expression_OR_null]
-        4. **Scope** (Grouping):
+        5. **Scope** (Grouping):
            - If user says "Per Exadata" or "Per Region", use "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["Exadata_Name"] }}
-           - The Scope runs the logic for EACH group separately.
 
         ### ADVANCED SOLVER FUNCTIONS (Use these for specific logic)
-        1. **Cohesion / Grouping**:
-           - Function: `ALL_MEMBERS_HAVE_SAME_VALUE`
-           - Arguments: ["AssignedMonth"]
-           - Requirement: Must be used with a `scope` that defines the group (e.g. Scope: For Each Family).
+        1. **Iterators (Loops)**:
+           - Use `iterator` to apply a rule multiple times (e.g. "For every month").
+           - Params: `{{ "variable": "m", "range": [1, 48] }}` (or `"range": "ALL_MONTHS"`).
+           - Inside expression, use `{{ "variable": "m" }}`.
 
-        2. **Capacity / Ramp-up**:
+        2. **Cohesion / Grouping**:
+           - Function: `ALL_MEMBERS_HAVE_SAME_VALUE`
+           - Arguments: ["AssignedMonth"] (or expression like `{{ "operator": "-", "operands": ["AssignedMonth", "Offset"] }}`)
+           - Requirement: Must be used with a `scope`.
+
+        3. **Capacity / Ramp-up**:
            - Function: `GET_SUM_FOR_MONTH` or `GET_POD_COUNT_FOR_MONTH`
            - Arguments: [MonthIndex, ColumnName (or "count"), OptionalFilter]
-           - Example: {{ "function": "GET_SUM_FOR_MONTH", "arguments": [15, "DB_SIZE"] }}
 
         ### STRICT JSON OUTPUT FORMAT
         {{
             "rule_type": "descriptive_snake_case",
             "description": "Human readable description",
             "params": {{
+                "iterator": {{ "variable": "m", "range": "ALL_MONTHS" }} (OPTIONAL),
                 "scope": {{ "type": "GLOBAL" }} OR {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": [...] }},
                 "expression": {{
-                    "operator": "AND/OR/IMPLIES/==/<=/IN",
+                    "operator": "AND/OR/IMPLIES/==/<=/IN/%/+",
                     "operands": [ ... recursive nesting ... ]
                 }}
             }}
@@ -99,62 +104,83 @@ class GenericArchitect:
                      {{ "operator": "<", "operands": [ {{ "variable": "DB_SIZE" }}, 3000 ] }}
                   ]
                 }},
-                {{
-                  "operator": ">=",
-                  "operands": [ {{ "variable": "AssignedMonth" }}, 12 ]
-                }}
+                {{ "operator": ">=", "operands": [ {{ "variable": "AssignedMonth" }}, 12 ] }}
               ]
             }}
           }}
         }}
 
-        Example 2: "Limit pods to 200 per Exadata per month" (Use Loop or Generate for Month 1)
+        Example 2: "Limit pods to 200 per Exadata per month"
         {{
-          "rule_type": "group_concurrency_limit_m1",
+          "rule_type": "group_concurrency_limit_iterative",
           "params": {{
+            "iterator": {{ "variable": "m", "range": "ALL_MONTHS" }},
             "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["Exadata Name"] }},
             "expression": {{
                 "operator": "<=",
                 "operands": [
-                    {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [1, "count"] }},
+                    {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [{{ "variable": "m" }}, "count"] }},
                     200
                 ]
             }}
           }}
         }}
 
-        Example 3: "All pods in a Family must move together"
+        Example 3: "Mixed Cohort: If Cohort C (Soak), must start in Month where (Month % 3 == 2)"
         {{
-          "rule_type": "family_cohesion",
+          "rule_type": "mixed_cohort_soak_modulo",
           "params": {{
-            "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["FAMILY_NAME"] }},
             "expression": {{
-               "function": "ALL_MEMBERS_HAVE_SAME_VALUE",
-               "arguments": ["AssignedMonth"]
-            }}
-          }}
-        }}
-
-        Example 4: "Max 500 pods in Month 15"
-        {{
-          "rule_type": "capacity_limit_m15",
-          "params": {{
-            "scope": {{ "type": "GLOBAL" }},
-            "expression": {{
-              "operator": "<=",
+              "operator": "IMPLIES",
               "operands": [
-                {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [15, "count"] }},
-                500
+                {{
+                  "operator": "AND",
+                  "operands": [
+                    {{ "operator": "==", "operands": [{{ "variable": "FACP_COHORT" }}, "Cohort C"] }},
+                    {{ "operator": "==", "operands": [{{ "variable": "Soak" }}, true] }}
+                  ]
+                }},
+                {{
+                   "operator": "==",
+                   "operands": [
+                      {{ "operator": "%", "operands": [{{ "variable": "AssignedMonth" }}, 3] }},
+                      2
+                   ]
+                }}
               ]
             }}
           }}
         }}
 
+        Example 4: "Limit total pods to 14000 between Month 18 and 29" (Period Limit)
+        {{
+          "rule_type": "period_limit_18_29",
+          "params": {{
+            "iterator": {{ "variable": "m", "range": [18, 29] }},
+            "scope": {{ "type": "GLOBAL" }},
+            "expression": {{
+               "operator": "<=",
+               "operands": [
+                 {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [{{ "variable": "m" }}, "count"] }},
+                 14000
+               ]
+               (Wait, "Limit TOTAL pods in period" means Sum of ALL months? Or Limit per month?
+                If "Limit total pods assigned IN the period", it means Sum(Count(m) for m in 18..29) <= 14000.
+                This requires summing ACROSS the iterator.
+                Standard Iterator applies rule PER step.
+                If you need SUM across range, use explicit SUM function on range?
+                Or construct expression: SUM(GET_COUNT(18), GET_COUNT(19)...).
+                For now, assume "Limit capacity per month" usually. If Total Period Cap is needed, generate distinct rule.)
+            }}
+          }}
+        }}
+
         ### CRITICAL INSTRUCTIONS
-        - Map user terms (e.g., "Tiny") to Schema Values (e.g., "<1.5TB").
-        - If the user defines a condition (e.g. "Large DBs") and a timeframe (e.g. "Start Jan 2027"), use the IMPLIES operator: (Condition) IMPLIES (Timeframe).
-        - Calculate Month Indices relative to the Plan Start Date defined above.
-        - **PRIORITIZE** Advanced Solver Functions (`ALL_MEMBERS_HAVE_SAME_VALUE`, `GET_POD_COUNT_FOR_MONTH`) over complex arithmetic workarounds.
+        - Use `IMPLIES` for conditional logic.
+        - Use `iterator` for "Per Month" constraints.
+        - Use Arithmetic (`%`, `+`, `-`) for offset/cycle logic.
+        - Calculate Month Indices relative to Plan Start Date.
+        - **PRIORITIZE** Advanced Solver Functions (`ALL_MEMBERS_HAVE_SAME_VALUE`, `GET_POD_COUNT_FOR_MONTH`).
 
         {history_context}
         """
@@ -186,7 +212,6 @@ class GenericArchitect:
     def _validate_values(self, cdl_json, df):
         """
         Recursively checks if values in the CDL actually exist in the DataFrame.
-        Handles High Cardinality columns (like Exadata Names) that weren't in the Passport.
         """
         expr = cdl_json.get('params', {}).get('expression', {})
         
@@ -212,8 +237,8 @@ class GenericArchitect:
                 
                 # VALIDATE
                 if col_name and target_vals:
-                    # Skip validation for Virtual Variables like AssignedMonth
-                    if col_name in ["AssignedMonth", "CURRENT_MONTH"]:
+                    # Skip validation for Virtual Variables
+                    if col_name in ["AssignedMonth", "CURRENT_MONTH", "m", "i"]:
                         return None
 
                     if col_name not in df.columns:

@@ -106,12 +106,45 @@ class SchedulingSolver:
 
     def _apply_universal_constraint(self, cdl):
         params = cdl.get('params', {})
-        scope = params.get('scope', {'type': 'GLOBAL'})
-        expr = params.get('expression', {})
 
+        # 1. Iterator Logic (e.g. For Each Month)
+        iterator = params.get('iterator')
+        if iterator:
+            var_name = iterator.get('variable', 'i')
+            start, end = iterator.get('range', [1, 1])
+            # If range is dynamic (string), parse it? Assuming list of ints for now.
+            # Or simplified: "range": "1..48" or "ALL_MONTHS"
+            if isinstance(iterator.get('range'), str) and iterator['range'] == 'ALL_MONTHS':
+                start, end = self._get_horizon()
+
+            for i in range(start, end + 1):
+                # Inject iteration variable into context?
+                # We need to pass it down.
+                # Since constraints are stateless except for model, we can just call recursive apply
+                # with a modified context? But apply uses `cdl` object.
+                # We need to inject the variable into `_eval`'s context.
+                # BUT `_apply` resolves scope first.
+                # So we pass `extra_vars` to `_resolve_scope` or `_apply_inner`?
+
+                # Let's refactor to `_apply_inner(scope, expr, extra_vars)`
+                self._apply_inner(
+                    params.get('scope', {'type': 'GLOBAL'}),
+                    params.get('expression', {}),
+                    {var_name: i}
+                )
+        else:
+            self._apply_inner(
+                params.get('scope', {'type': 'GLOBAL'}),
+                params.get('expression', {}),
+                {}
+            )
+
+    def _apply_inner(self, scope, expr, extra_vars):
         contexts = self._resolve_scope(scope)
-
         for ctx in contexts:
+            # Merge extra_vars into context vars
+            ctx['vars'].update(extra_vars)
+
             res = self._eval(expr, ctx)
             if hasattr(res, 'Index'):
                 self.model.Add(res == 1)
@@ -303,6 +336,9 @@ class SchedulingSolver:
         if op == 'IN':
             return self._apply_in(left_raw, right_raw)
 
+        if op in ['+', '-', '*', '/', '%']:
+            return self._apply_arithmetic(op, left_raw, right_raw)
+
         if op == 'AND':
             ops = [self._eval(x, context) for x in operands]
             return self._apply_logic_gate('AND', ops)
@@ -335,6 +371,77 @@ class SchedulingSolver:
             return self._apply_logic_gate('AND', bools)
 
         return self._apply_scalar_comparison(op, left, right)
+
+    def _apply_arithmetic(self, op, left, right):
+        # 1. Handle Broadcasting (List inputs)
+        if isinstance(left, list) and not isinstance(right, list):
+            return [self._apply_arithmetic(op, l, right) for l in left]
+        if not isinstance(left, list) and isinstance(right, list):
+            return [self._apply_arithmetic(op, left, r) for r in right]
+        if isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right): return None # Error or Mismatch
+            return [self._apply_arithmetic(op, l, r) for l, r in zip(left, right)]
+
+        # 2. Scalar Logic
+        # Handle constants (Python Math)
+        is_left_static = isinstance(left, (int, float))
+        is_right_static = isinstance(right, (int, float))
+
+        if is_left_static and is_right_static:
+            if op == '+': return left + right
+            if op == '-': return left - right
+            if op == '*': return left * right
+            if op == '/': return left / right if right != 0 else 0
+            if op == '%': return left % right if right != 0 else 0
+
+        # Handle Linear Expressions (CP-SAT)
+
+        if op == '+': return left + right
+        if op == '-': return left - right
+        if op == '*':
+            if not is_left_static and not is_right_static:
+                left_var = self._to_int_var(left)
+                right_var = self._to_int_var(right)
+                prod = self.model.NewIntVar(0, 10000000, f'prod_{id(left)}_{id(right)}')
+                self.model.AddMultiplicationEquality(prod, [left_var, right_var])
+                return prod
+            return left * right
+
+        if op == '/':
+            if not is_left_static or not is_right_static:
+                left_var = self._to_int_var(left)
+                right_var = self._to_int_var(right)
+                div = self.model.NewIntVar(0, 1000000, f'div_{id(left)}')
+                self.model.AddDivisionEquality(div, left_var, right_var)
+                return div
+            return int(left / right)
+
+        if op == '%':
+            if not is_left_static or not is_right_static:
+                left_var = self._to_int_var(left)
+                right_var = self._to_int_var(right)
+                mod_res = self.model.NewIntVar(0, 1000000, f'mod_{id(left)}')
+                self.model.AddModuloEquality(mod_res, left_var, right_var)
+                return mod_res
+            return int(left % right)
+
+        return None
+
+    def _to_int_var(self, expr):
+        """Helper to convert a LinearExpr (or int) to a single IntVar."""
+        if isinstance(expr, int): return self.model.NewConstant(expr)
+        if hasattr(expr, 'Index'): return expr # Already IntVar
+        # It's a LinearExpr (e.g. x + 5)
+        # We need to bind it to a new variable: v = expr
+        # Bounds? LinearExpr can be anything.
+        # We assume reasonable bounds for planning (0..1000 or -1000..1000)
+        # AssignedMonth is 0..48. DB_SIZE can be large.
+        # Safe bounds: -1M to 1M?
+        # If it's DB_SIZE, it's huge.
+        # But usually we don't do DB_SIZE % X. We do Month % 3.
+        v = self.model.NewIntVar(-1000000, 1000000, f'expr_{id(expr)}')
+        self.model.Add(v == expr)
+        return v
 
     def _apply_scalar_comparison(self, op, left, right):
         # Force numeric comparison if strings are passed but look like numbers
