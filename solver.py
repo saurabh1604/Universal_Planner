@@ -23,10 +23,6 @@ class SchedulingSolver:
         for col in self.pod_data_df.columns:
             # Force numeric conversion where possible
             try:
-                # to_numeric with coerce turns invalid parsing to NaN
-                # We then fill NaN with original values? No, that keeps them as strings/objects.
-                # If we want math, we need numbers.
-                # If it's mixed (some numbers, some strings), we probably want numbers.
                 self.pod_data_df[col] = pd.to_numeric(self.pod_data_df[col], errors='ignore')
             except Exception as e:
                 pass
@@ -45,6 +41,9 @@ class SchedulingSolver:
 
         # Cache for indicator variables: {(pod_name, month): BoolVar}
         self.pod_month_indicators = {}
+
+        # Objective Terms (Values to Minimize)
+        self.objective_terms = []
 
     def _get_horizon(self):
         # Default horizon: 12 to 48 months
@@ -82,11 +81,20 @@ class SchedulingSolver:
                 logger.error(f"ERROR applying constraint {c.get('rule_type')}: {e}")
                 traceback.print_exc()
 
-        # 3. Objective: Minimize Makespan (Generic Default)
-        # Minimize the maximum month used
+        # 3. Objective: Minimize Makespan + Custom Terms
+        # Minimize the maximum month used (Default Objective)
         makespan = self.model.NewIntVar(start_month, max_month, 'makespan')
         self.model.AddMaxEquality(makespan, list(self.pod_vars.values()))
-        self.model.Minimize(makespan)
+
+        # Combine Default + Custom Objectives
+        # We weigh Makespan heavily (500) as per user preference, but let custom terms influence distribution.
+        total_objective = (makespan * 500)
+
+        if self.objective_terms:
+            logger.info(f"Engine: Adding {len(self.objective_terms)} custom objective terms.")
+            total_objective += sum(self.objective_terms)
+
+        self.model.Minimize(total_objective)
 
         # 4. Solve
         solver = cp_model.CpSolver()
@@ -106,6 +114,9 @@ class SchedulingSolver:
 
     def _apply_universal_constraint(self, cdl):
         params = cdl.get('params', {})
+        rule_type = params.get('type', 'CONSTRAINT') # CONSTRAINT or OBJECTIVE
+        weight = params.get('weight', 1)
+        action = params.get('action', 'MINIMIZE')
 
         # 1. Iterator Logic (e.g. For Each Month)
         iterator = params.get('iterator')
@@ -113,60 +124,197 @@ class SchedulingSolver:
             var_name = iterator.get('variable', 'i')
             start, end = iterator.get('range', [1, 1])
             # If range is dynamic (string), parse it? Assuming list of ints for now.
-            # Or simplified: "range": "1..48" or "ALL_MONTHS"
             if isinstance(iterator.get('range'), str) and iterator['range'] == 'ALL_MONTHS':
                 start, end = self._get_horizon()
 
             for i in range(start, end + 1):
-                # Inject iteration variable into context?
-                # We need to pass it down.
-                # Since constraints are stateless except for model, we can just call recursive apply
-                # with a modified context? But apply uses `cdl` object.
-                # We need to inject the variable into `_eval`'s context.
-                # BUT `_apply` resolves scope first.
-                # So we pass `extra_vars` to `_resolve_scope` or `_apply_inner`?
-
-                # Let's refactor to `_apply_inner(scope, expr, extra_vars)`
                 self._apply_inner(
                     params.get('scope', {'type': 'GLOBAL'}),
                     params.get('expression', {}),
-                    {var_name: i}
+                    {var_name: i},
+                    rule_type, weight, action
                 )
         else:
             self._apply_inner(
                 params.get('scope', {'type': 'GLOBAL'}),
                 params.get('expression', {}),
-                {}
+                {},
+                rule_type, weight, action
             )
 
-    def _apply_inner(self, scope, expr, extra_vars):
+    def _apply_inner(self, scope, expr, extra_vars, rule_type='CONSTRAINT', weight=1, action='MINIMIZE'):
         contexts = self._resolve_scope(scope)
         for ctx in contexts:
             # Merge extra_vars into context vars
             ctx['vars'].update(extra_vars)
 
+            # Evaluate the expression
+            # For CONSTRAINT: returns boolean (True/False/BoolVar)
+            # For OBJECTIVE: returns numeric value (Int/IntVar/LinearExpr) to minimize
             res = self._eval(expr, ctx)
-            if hasattr(res, 'Index'):
-                self.model.Add(res == 1)
-            elif isinstance(res, bool):
-                if not res:
-                    self.model.Add(self.model.NewConstant(0) == 1)
+
+            if rule_type == 'OBJECTIVE':
+                # Add to objective terms
+                if res is None: continue
+
+                # Handle List result (if scope returned multiple items in one context)
+                terms = res if isinstance(res, list) else [res]
+
+                for t in terms:
+                    # Convert to LinearExpr/IntVar if constant
+                    term = self._to_int_var(t)
+
+                    # Apply Weight
+                    weighted_term = term * weight
+
+                    # Apply Action (Minimize is default +)
+                    if action == 'MAXIMIZE':
+                        # To Maximize X, we Minimize -X
+                        weighted_term = weighted_term * -1
+
+                    self.objective_terms.append(weighted_term)
+
+            else:
+                # Standard Constraint
+                if hasattr(res, 'Index'):
+                    self.model.Add(res == 1)
+                elif isinstance(res, bool):
+                    if not res:
+                        self.model.Add(self.model.NewConstant(0) == 1)
 
     def _resolve_scope(self, scope):
         sType = scope.get('type', 'GLOBAL')
+        filter_expr = scope.get('filter')
 
         if sType == 'GLOBAL':
-            return [{'pods': list(self.pod_vars.keys()), 'vars': {}}]
-
+            target_pods = list(self.pod_vars.keys())
         elif sType == 'FOR_EACH_UNIQUE_COMBINATION':
             cols = scope.get('columns', [])
+            # ... (Grouping logic not fully used if we filter later, but let's stick to current)
+            # Actually, standard scope resolution returns ONE context per group.
+            # If we want per-pod filtering, we usually iterate groups.
+            # But wait, OBJECTIVES often apply PER POD (e.g. Prioritize Small Families).
+            # If scope is GLOBAL, we get ALL pods.
+            # If we want to filter specific pods, we need `scope: {type: GLOBAL, filter: ...}`.
+            # My current _resolve_scope implementation ignores `filter`.
+            # I should implement filtering in _resolve_scope.
+            target_pods = list(self.pod_vars.keys())
+
+            # Logic for grouping
+            cols = scope.get('columns', [])
             groups = defaultdict(list)
-            for pname in self.pod_vars.keys():
+
+            # Pre-filter pods if needed?
+            # Or filter AFTER grouping.
+
+            for pname in target_pods:
+                # Apply filter if exists
+                if filter_expr:
+                     # Check filter. Need to evaluate expression against pod data.
+                     # Using _eval requires context.
+                     # This is circular if _eval calls scope.
+                     # But filter expr should be simple static check.
+                     # Let's verify filter for this pod.
+                     sub_ctx = {'pods': [pname], 'vars': {}}
+                     # We can't use self._eval easily here if it calls other things?
+                     # Actually _eval is robust.
+                     if not self._check_filter_static(filter_expr, sub_ctx):
+                         continue
+
                 key = tuple(str(self.pod_map[pname].get(c, 'N/A')) for c in cols)
                 groups[key].append(pname)
+
             return [{'pods': pods, 'vars': {'group_key': k}} for k, pods in groups.items()]
 
+        # GLOBAL with Filter
+        if sType == 'GLOBAL':
+             filtered_pods = []
+             for pname in list(self.pod_vars.keys()):
+                 if filter_expr:
+                     sub_ctx = {'pods': [pname], 'vars': {}}
+                     if not self._check_filter_static(filter_expr, sub_ctx):
+                         continue
+                 filtered_pods.append(pname)
+             return [{'pods': filtered_pods, 'vars': {}}]
+
         return []
+
+    def _check_filter_static(self, expr, context):
+        """Helper to evaluate static filter expressions on pod data."""
+        # Use a separate static evaluation that returns python bool/int or None
+        res = self._eval_static(expr, context)
+        if isinstance(res, bool): return res
+        if res is None: return True # Dynamic/Unknown -> Include
+        return bool(res)
+
+    def _eval_static(self, node, context):
+        """Evaluate expression statically. Returns None if dynamic variables involved."""
+        if isinstance(node, (int, float, str, bool)): return node
+        if node is None: return None
+        if isinstance(node, list):
+            res_list = [self._eval_static(x, context) for x in node]
+            if any(r is None for r in res_list): return None
+            return res_list
+
+        if not isinstance(node, dict): return None
+
+        if 'variable' in node:
+            var = node['variable']
+            # If variable is in context['vars'] (iterators), return value
+            if var in context.get('vars', {}): return context['vars'][var]
+
+            # If variable is column data (static for a pod context)
+            if 'pods' in context and len(context['pods']) == 1:
+                 p = context['pods'][0]
+                 val = self.pod_map[p].get(var)
+                 if val is not None: return val
+
+            # If variable is 'AssignedMonth' (dynamic), return None
+            return None
+
+        if 'operator' in node:
+            op = node['operator']
+            operands = node.get('operands', [])
+            left = self._eval_static(operands[0], context)
+            right = self._eval_static(operands[1], context) if len(operands) > 1 else None
+
+            if left is None or (len(operands) > 1 and right is None): return None
+
+            # Perform static op
+            try:
+                if op == '==': return left == right
+                if op == '!=': return left != right
+                if op == '<': return left < right
+                if op == '<=': return left <= right
+                if op == '>': return left > right
+                if op == '>=': return left >= right
+                if op == 'IN':
+                    if isinstance(right, list): return left in right
+                    return False
+                if op == 'AND': return bool(left) and bool(right) # operands[0] and operands[1]
+                # Fix: AND operands is list?
+                # _eval_operator passes list to logic gate?
+                # Logic gates take list of operands?
+                # My _eval_operator for AND calls _apply_logic_gate which takes list.
+                # Here we simplify: if AND, evaluate all operands.
+                pass
+            except: return None
+
+            # Logic Ops (List operands)
+            if op == 'AND':
+                # Re-eval as list
+                # operands is list of nodes.
+                vals = [self._eval_static(x, context) for x in operands]
+                if any(v is None for v in vals): return None
+                return all(vals)
+            if op == 'OR':
+                vals = [self._eval_static(x, context) for x in operands]
+                if any(v is None for v in vals): return None
+                return any(vals)
+            if op == 'NOT':
+                return not left
+
+        return None
 
     def _eval(self, node, context):
         if isinstance(node, (int, float, str, bool)): return node

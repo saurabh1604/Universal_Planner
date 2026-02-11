@@ -73,11 +73,22 @@ class GenericArchitect:
            - Function: `GET_SUM_FOR_MONTH` or `GET_POD_COUNT_FOR_MONTH`
            - Arguments: [MonthIndex, ColumnName (or "count"), OptionalFilter]
 
+        ### OBJECTIVES (Soft Constraints)
+        - If user says "Prioritize", "Front-load", "Minimize delay", "Prefer":
+          - Set `params.type` to "OBJECTIVE".
+          - `params.action`: "MINIMIZE" (default) or "MAXIMIZE".
+          - `params.weight`: Priority (e.g. 100, 500, 1000).
+          - `params.expression`: The numeric value to optimize (usually `{{ "variable": "AssignedMonth" }}`).
+          - `params.scope`: Define WHICH pods this applies to (Scope + Filter).
+
         ### STRICT JSON OUTPUT FORMAT
         {{
             "rule_type": "descriptive_snake_case",
             "description": "Human readable description",
             "params": {{
+                "type": "CONSTRAINT" (default) OR "OBJECTIVE",
+                "action": "MINIMIZE" OR "MAXIMIZE" (Only for Objective),
+                "weight": 100 (Only for Objective),
                 "iterator": {{ "variable": "m", "range": "ALL_MONTHS" }} (OPTIONAL),
                 "scope": {{ "type": "GLOBAL" }} OR {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": [...] }},
                 "expression": {{
@@ -89,30 +100,24 @@ class GenericArchitect:
 
         ### FEW-SHOT EXAMPLES (LEARN THE STRUCTURE)
 
-        Example 1: "Start large DBs (between 1.5TB and 3TB) from Month 12"
+        Example 1: "Prioritize small families (Size < 2TB) to start early"
         {{
-          "rule_type": "db_size_start_months",
+          "rule_type": "prioritize_small_families",
           "params": {{
-            "scope": {{ "type": "GLOBAL" }},
-            "expression": {{
-              "operator": "IMPLIES",
-              "operands": [
-                {{
-                  "operator": "AND",
-                  "operands": [
-                     {{ "operator": ">=", "operands": [ {{ "variable": "DB_SIZE" }}, 1500 ] }},
-                     {{ "operator": "<", "operands": [ {{ "variable": "DB_SIZE" }}, 3000 ] }}
-                  ]
-                }},
-                {{ "operator": ">=", "operands": [ {{ "variable": "AssignedMonth" }}, 12 ] }}
-              ]
-            }}
+            "type": "OBJECTIVE",
+            "action": "MINIMIZE",
+            "weight": 100,
+            "scope": {{
+                "type": "GLOBAL",
+                "filter": {{ "operator": "<", "operands": [ {{ "variable": "DB_SIZE" }}, 2000 ] }}
+            }},
+            "expression": {{ "variable": "AssignedMonth" }}
           }}
         }}
 
         Example 2: "Limit pods to 200 per Exadata per month"
         {{
-          "rule_type": "group_concurrency_limit_iterative",
+          "rule_type": "group_concurrency_limit",
           "params": {{
             "iterator": {{ "variable": "m", "range": "ALL_MONTHS" }},
             "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["Exadata Name"] }},
@@ -152,35 +157,11 @@ class GenericArchitect:
           }}
         }}
 
-        Example 4: "Limit total pods to 14000 between Month 18 and 29" (Period Limit)
-        {{
-          "rule_type": "period_limit_18_29",
-          "params": {{
-            "iterator": {{ "variable": "m", "range": [18, 29] }},
-            "scope": {{ "type": "GLOBAL" }},
-            "expression": {{
-               "operator": "<=",
-               "operands": [
-                 {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [{{ "variable": "m" }}, "count"] }},
-                 14000
-               ]
-               (Wait, "Limit TOTAL pods in period" means Sum of ALL months? Or Limit per month?
-                If "Limit total pods assigned IN the period", it means Sum(Count(m) for m in 18..29) <= 14000.
-                This requires summing ACROSS the iterator.
-                Standard Iterator applies rule PER step.
-                If you need SUM across range, use explicit SUM function on range?
-                Or construct expression: SUM(GET_COUNT(18), GET_COUNT(19)...).
-                For now, assume "Limit capacity per month" usually. If Total Period Cap is needed, generate distinct rule.)
-            }}
-          }}
-        }}
-
         ### CRITICAL INSTRUCTIONS
         - Use `IMPLIES` for conditional logic.
         - Use `iterator` for "Per Month" constraints.
-        - Use Arithmetic (`%`, `+`, `-`) for offset/cycle logic.
+        - Use `OBJECTIVE` type for priorities/preferences.
         - Calculate Month Indices relative to Plan Start Date.
-        - **PRIORITIZE** Advanced Solver Functions (`ALL_MEMBERS_HAVE_SAME_VALUE`, `GET_POD_COUNT_FOR_MONTH`).
 
         {history_context}
         """
@@ -214,6 +195,7 @@ class GenericArchitect:
         Recursively checks if values in the CDL actually exist in the DataFrame.
         """
         expr = cdl_json.get('params', {}).get('expression', {})
+        scope = cdl_json.get('params', {}).get('scope', {})
         
         def recursive_check(node):
             if not isinstance(node, dict): return None
@@ -269,4 +251,13 @@ class GenericArchitect:
                          if err: return err
             return None
 
-        return recursive_check(expr)
+        # Check Expression
+        err = recursive_check(expr)
+        if err: return err
+
+        # Check Scope Filter
+        if 'filter' in scope:
+            err = recursive_check(scope['filter'])
+            if err: return err
+
+        return None
