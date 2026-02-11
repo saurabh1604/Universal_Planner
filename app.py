@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from schema_engine import SchemaEngine
 from architect import GenericArchitect
 from auditor import Auditor
+from solver import SchedulingSolver
 import json
 import os
 from datetime import date
@@ -161,6 +163,63 @@ if 'df' in st.session_state:
                     response = f"⛔ **Request Rejected:** {message}"
                     auditor_placeholder.error(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
+
+    # PANEL 3: EXECUTION & VISUALIZATION (Bottom)
+    st.divider()
+    st.subheader("Layer 3: The Universal Solver")
+
+    if st.button("🚀 Generate Schedule"):
+        if not st.session_state.constraints:
+            st.warning("No constraints to solve!")
+        else:
+            with st.spinner("Optimizing Schedule..."):
+                # Prepare Plan JSON
+                plan_json = {
+                    "global_parameters": {
+                        "total_duration_months": 48,
+                        "start_month_index": 1
+                    },
+                    "constraints": st.session_state.constraints
+                }
+
+                # Convert DF to list of dicts
+                pod_data = st.session_state.df.to_dict('records')
+
+                # Solve
+                solver = SchedulingSolver(pod_data, plan_json)
+                result_df = solver.solve()
+
+                if result_df is not None:
+                    st.session_state.result_df = result_df
+                    st.success(f"Schedule Generated! ({len(result_df)} assignments)")
+                else:
+                    st.error("No Feasible Solution Found.")
+
+    # Display Result
+    if 'result_df' in st.session_state:
+        res = st.session_state.result_df
+
+        # 1. Visualization
+        col_v1, col_v2 = st.columns([2, 1])
+        with col_v1:
+            # Aggregate per month
+            monthly_counts = res['AssignedMonth'].value_counts().sort_index().reset_index()
+            monthly_counts.columns = ['Month', 'Pod Count']
+            fig = px.bar(monthly_counts, x='Month', y='Pod Count', title="Migration Wave Schedule")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col_v2:
+            st.write("#### Download Plan")
+            csv = res.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv,
+                file_name="universal_migration_plan.csv",
+                mime="text/csv"
+            )
+
+        with st.expander("View Detailed Schedule"):
+            st.dataframe(res, use_container_width=True)
 
 else:
     st.info("Please upload a CSV to start.")

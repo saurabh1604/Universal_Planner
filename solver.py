@@ -353,6 +353,9 @@ class SchedulingSolver:
         if func in ['GET_SUM_FOR_MONTH', 'GET_POD_COUNT_FOR_MONTH']:
             return self._eval_capacity_function(func, args, context)
 
+        if func == 'GET_POD_COUNT_FOR_PERIOD':
+            return self._eval_period_capacity_function(args, context)
+
         if func == 'ALL_MEMBERS_HAVE_SAME_VALUE':
             return self._eval_all_same(args, context)
 
@@ -388,12 +391,111 @@ class SchedulingSolver:
 
         return None
 
+    def _eval_period_capacity_function(self, args, context):
+        # args: [StartMonth, EndMonth, OptionalFilter]
+        start_m = self._eval(args[0], context)
+        end_m = self._eval(args[1], context)
+        filter_node = args[2] if len(args) > 2 else None
+
+        if not isinstance(start_m, int) or not isinstance(end_m, int):
+            return 0 # Dynamic period not supported yet
+
+        sum_terms = []
+        target_pods = context['pods']
+
+        # Optimization: Pre-calculate filter for all pods once?
+        # But filter might be dynamic.
+        # If filter is static, we can prune pods list.
+
+        relevant_pods = target_pods
+        if filter_node:
+             # Try static filtering first
+             static_filtered = []
+             for p in target_pods:
+                 if self._check_filter_static(filter_node, {'pods': [p], 'vars': {}}):
+                     static_filtered.append(p)
+             relevant_pods = static_filtered
+
+        for p in relevant_pods:
+            # We want to check if AssignedMonth(p) is in [start_m, end_m].
+            # Variable v.
+            # v >= start AND v <= end.
+            # Indicator?
+            # We have indicators for each month.
+            # Sum( indicators[p][m] for m in start..end )
+
+            # Check filter (dynamic)
+            condition_vars = []
+            if filter_node:
+                # If static check passed, we still need to check dynamic?
+                # If static check returned True (maybe dynamic), we must check dynamic expression.
+                # If static check returned False, we pruned it.
+                # Re-eval filter dynamically
+                res = self._eval(filter_node, {'pods': [p], 'vars': {}})
+                if hasattr(res, 'Index'):
+                    condition_vars.append(res)
+                elif isinstance(res, bool) and not res:
+                    continue # Should have been pruned, but just in case
+
+            # Period Indicators
+            pod_period_indicators = []
+            for m in range(start_m, end_m + 1):
+                ind = self.pod_month_indicators.get((p, m))
+                if ind is not None:
+                    pod_period_indicators.append(ind)
+
+            if not pod_period_indicators: continue
+
+            # If pod is in period => Sum(indicators) == 1 (since months are mutually exclusive)
+            # So `is_in_period` = Sum(indicators).
+            # If we have filter, we need `is_in_period AND Filter`.
+
+            in_period_var = sum(pod_period_indicators) # This is an LinearExpr (0 or 1)
+
+            if condition_vars:
+                # We need (InPeriod AND Filter).
+                # InPeriod is 0/1. Filter is BoolVar.
+                # Product: InPeriod * Filter.
+                # LinearExpr * BoolVar -> Allowed?
+                # Yes, CP-SAT allows Sum(Vars).
+
+                # If multiple filter conditions, AND them first
+                if len(condition_vars) > 1:
+                    filter_combined = self.model.NewBoolVar(f'filter_comb_{p}')
+                    self.model.AddBoolAnd(condition_vars).OnlyEnforceIf(filter_combined)
+                    self.model.AddBoolOr([v.Not() for v in condition_vars]).OnlyEnforceIf(filter_combined.Not())
+                    final_filter = filter_combined
+                else:
+                    final_filter = condition_vars[0]
+
+                # Term: in_period_var * final_filter
+                # Since in_period_var is sum of booleans (mutually exclusive), it is 0 or 1.
+                # We can treat it as a variable?
+                # But it's an expression.
+                # We can use AddMultiplicationEquality if we bind in_period to a var?
+                # Or just use `OnlyEnforceIf`.
+
+                # Actually, simply: Sum( ind_m * filter ) for all m.
+                # For each month m: term_m = ind_m AND filter.
+                # Total = Sum(term_m).
+
+                for m in range(start_m, end_m + 1):
+                    ind = self.pod_month_indicators.get((p, m))
+                    if ind is not None:
+                        # term = ind AND final_filter
+                        term = self.model.NewBoolVar(f'term_{p}_{m}')
+                        self.model.AddBoolAnd([ind, final_filter]).OnlyEnforceIf(term)
+                        self.model.AddBoolOr([ind.Not(), final_filter.Not()]).OnlyEnforceIf(term.Not())
+                        sum_terms.append(term)
+            else:
+                # No filter, just add period indicators
+                sum_terms.extend(pod_period_indicators)
+
+        return sum(sum_terms)
+
     def _eval_capacity_function(self, func, args, context):
         m_idx = self._eval(args[0], context)
         col_name = args[1]
-        filter_node = args[2] if len(args) > 2 else None
-
-        target_pods = context['pods']
         sum_terms = []
 
         for p in target_pods:
