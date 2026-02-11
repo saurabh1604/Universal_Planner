@@ -1,23 +1,37 @@
 import pandas as pd
 from ortools.sat.python import cp_model
 from collections import defaultdict
-import os
-import sys
+import logging
 import traceback
-import json
+import numpy as np
 
 # --- CONFIGURATION ---
-TEMP_KNOWLEDGE_FILE = "_temp_knowledge.json"
-POD_DATA_FILE = "adbs_data3.csv"
-PLAN_OUTPUT_FILE = "_temp_plan.csv"
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class SchedulingSolver:
+    """
+    A generic solver that interprets Constraint Definition Language (CDL)
+    using Google OR-Tools CP-SAT.
+    """
     def __init__(self, pod_data, plan_json):
-        self.pod_data = pod_data
+        self.raw_pod_data = pod_data
         self.pod_data_df = pd.DataFrame(pod_data)
 
-        # --- Preprocessing & Defaults ---
-        self.pod_data_df = self.pod_data_df.fillna("UNKNOWN")
+        # --- Preprocessing ---
+        # Convert numeric columns safely
+        for col in self.pod_data_df.columns:
+            # Force numeric conversion where possible
+            try:
+                # to_numeric with coerce turns invalid parsing to NaN
+                # We then fill NaN with original values? No, that keeps them as strings/objects.
+                # If we want math, we need numbers.
+                # If it's mixed (some numbers, some strings), we probably want numbers.
+                self.pod_data_df[col] = pd.to_numeric(self.pod_data_df[col], errors='ignore')
+            except Exception as e:
+                pass
+
+        # Ensure IDCS_MONTH is numeric if present
         if 'IDCS_MONTH' in self.pod_data_df.columns:
              self.pod_data_df['IDCS_MONTH'] = pd.to_numeric(self.pod_data_df['IDCS_MONTH'], errors='coerce').fillna(0).astype(int)
 
@@ -26,44 +40,50 @@ class SchedulingSolver:
         self.constraints = plan_json.get('constraints', [])
 
         self.model = cp_model.CpModel()
-        self.pod_vars = {} # {pod_name: IntVar}
-        self.pod_map = {pod.get('PODNAME'): pod for pod in self.pod_data if pod.get('PODNAME')}
+        self.pod_vars = {} # {pod_name: IntVar(AssignedMonth)}
+        self.pod_map = {str(pod.get('PODNAME')): pod for pod in self.pod_data if pod.get('PODNAME')}
 
-        # Indicators Cache: {(pod_name, month): BoolVar}
+        # Cache for indicator variables: {(pod_name, month): BoolVar}
         self.pod_month_indicators = {}
 
     def _get_horizon(self):
-        total_months = self.global_params.get("total_duration_months", 48)
-        start_month = self.global_params.get("start_month_index", 12)
+        # Default horizon: 12 to 48 months
+        total_months = int(self.global_params.get("total_duration_months", 48))
+        start_month = int(self.global_params.get("start_month_index", 1))
         return start_month, max(start_month, total_months)
 
     def solve(self):
-        print("Engine: Initializing variables...")
+        logger.info("Engine: Initializing variables...")
         start_month, max_month = self._get_horizon()
 
-        # 1. Create Variables
+        # 1. Create Decision Variables (AssignedMonth)
         for pod in self.pod_data:
-            pod_name = pod.get('PODNAME')
+            pod_name = str(pod.get('PODNAME'))
             if pod_name:
+                # Variable: AssignedMonth for this pod
                 v = self.model.NewIntVar(start_month, max_month, f"month_{pod_name}")
                 self.pod_vars[pod_name] = v
-                # Create indicators lazily or eagerly? Eagerly is safer for generic constraints.
+
+                # Create boolean indicators for each month (needed for capacity constraints)
                 for m in range(start_month, max_month + 1):
-                    b = self.model.NewBoolVar(f"i_{pod_name}_{m}")
+                    b = self.model.NewBoolVar(f"ind_{pod_name}_{m}")
+                    # b <=> (v == m)
                     self.model.Add(v == m).OnlyEnforceIf(b)
                     self.model.Add(v != m).OnlyEnforceIf(b.Not())
                     self.pod_month_indicators[(pod_name, m)] = b
 
         # 2. Apply Constraints (Universal Interpreter)
-        print("Engine: Applying Universal CDL Constraints...")
-        for c in self.constraints:
+        logger.info(f"Engine: Applying {len(self.constraints)} Universal CDL Constraints...")
+        for i, c in enumerate(self.constraints):
             try:
+                logger.info(f"Applying Constraint {i+1}: {c.get('rule_type', 'Unknown')}")
                 self._apply_universal_constraint(c)
             except Exception as e:
-                print(f"ERROR applying constraint {c.get('rule_type')}: {e}")
-                # traceback.print_exc()
+                logger.error(f"ERROR applying constraint {c.get('rule_type')}: {e}")
+                traceback.print_exc()
 
-        # 3. Objective (Minimize Makespan default)
+        # 3. Objective: Minimize Makespan (Generic Default)
+        # Minimize the maximum month used
         makespan = self.model.NewIntVar(start_month, max_month, 'makespan')
         self.model.AddMaxEquality(makespan, list(self.pod_vars.values()))
         self.model.Minimize(makespan)
@@ -74,10 +94,10 @@ class SchedulingSolver:
         status = solver.Solve(self.model)
 
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            print(f"Solution Found: {solver.StatusName(status)}")
+            logger.info(f"Solution Found: {solver.StatusName(status)}")
             return self._extract_schedule(solver)
         else:
-            print(f"No Solution: {solver.StatusName(status)}")
+            logger.warning(f"No Solution: {solver.StatusName(status)}")
             return None
 
     # ==============================================================================
@@ -85,20 +105,19 @@ class SchedulingSolver:
     # ==============================================================================
 
     def _apply_universal_constraint(self, cdl):
-        """
-        Interprets a CDL object with 'scope' and 'expression'.
-        """
-        scope = cdl.get('params', {}).get('scope', {'type': 'GLOBAL'})
-        expr = cdl.get('params', {}).get('expression', {})
+        params = cdl.get('params', {})
+        scope = params.get('scope', {'type': 'GLOBAL'})
+        expr = params.get('expression', {})
 
         contexts = self._resolve_scope(scope)
+
         for ctx in contexts:
             res = self._eval(expr, ctx)
-            # If result is a BoolVar, enforce it being True
             if hasattr(res, 'Index'):
                 self.model.Add(res == 1)
-            # If result is generic boolean True/False (python), check it?
-            # Usually strict constraints return a BoolVar.
+            elif isinstance(res, bool):
+                if not res:
+                    self.model.Add(self.model.NewConstant(0) == 1)
 
     def _resolve_scope(self, scope):
         sType = scope.get('type', 'GLOBAL')
@@ -118,192 +137,309 @@ class SchedulingSolver:
 
     def _eval(self, node, context):
         if isinstance(node, (int, float, str, bool)): return node
+        if node is None: return None
         if isinstance(node, list): return [self._eval(x, context) for x in node]
+
         if not isinstance(node, dict): return node
 
-        # Variable
         if 'variable' in node:
-            var = node['variable']
-            if var == 'AssignedMonth':
-                # Return LIST of IntVars for current context pods
-                return [self.pod_vars[p] for p in context['pods']]
-            # Data Column
-            return [self.pod_map[p].get(var) for p in context['pods']]
+            return self._eval_variable(node, context)
 
-        # Function
         if 'function' in node:
             return self._eval_function(node, context)
 
-        # Operator
         if 'operator' in node:
             return self._eval_operator(node, context)
 
         return None
 
+    def _eval_variable(self, node, context):
+        var = node['variable']
+        if var == 'AssignedMonth':
+            return [self.pod_vars[p] for p in context['pods']]
+        if var in context.get('vars', {}):
+            return context['vars'][var]
+
+        # Return raw values. Try to ensure they are numeric if they look like it?
+        # Pandas should have handled it, but let's be safe.
+        raw_vals = [self.pod_map[p].get(var) for p in context['pods']]
+        return raw_vals
+
     def _eval_function(self, node, context):
         func = node['function']
-        # Eval arguments first? Depends on function (lazy eval might be needed for COUNT)
-        # But for now, let's assume we eval them.
-        # Wait, ALL_MEMBERS arguments are meta-data sometimes.
+        args = node.get('arguments', [])
+
+        if func in ['GET_SUM_FOR_MONTH', 'GET_POD_COUNT_FOR_MONTH']:
+            return self._eval_capacity_function(func, args, context)
 
         if func == 'ALL_MEMBERS_HAVE_SAME_VALUE':
-            # args: [ {group_by...}, "AssignedMonth" ]
-            # We assume context is already grouped.
-            target = node.get('arguments', [])[1]
-            if target == "AssignedMonth":
-                pod_vars = [self.pod_vars[p] for p in context['pods']]
-                if not pod_vars: return self.model.NewConstant(1)
-
-                # Enforce: v[0] == v[1] == v[2]...
-                # Returns BoolVar representing compliance
-                # Optimization: Direct Add() is faster than reified if strictly enforced
-                # But to keep recursive structure, we return a BoolVar
-                all_same = self.model.NewBoolVar('all_same')
-
-                # Logic: (v0==v1) AND (v1==v2) ...
-                # Easier: All equal to v0
-                first = pod_vars[0]
-                bools = []
-                for other in pod_vars[1:]:
-                    b = self.model.NewBoolVar('')
-                    self.model.Add(first == other).OnlyEnforceIf(b)
-                    self.model.Add(first != other).OnlyEnforceIf(b.Not())
-                    bools.append(b)
-
-                if not bools: return self.model.NewConstant(1)
-                self.model.AddBoolAnd(bools).OnlyEnforceIf(all_same)
-                self.model.AddBoolOr([b.Not() for b in bools]).OnlyEnforceIf(all_same.Not())
-                return all_same
-
-        if func == 'GET_POD_COUNT_FOR_MONTH':
-            # args: [MonthIndex, OptionalFilter]
-            args = node.get('arguments', [])
-            m_idx = args[0] # Should be int
-            filter_node = args[1] if len(args) > 1 else None
-
-            # Iterate ALL pods (Global calculation, regardless of context scope usually)
-            # But technically it returns an INT (count).
-            count_var = self.model.NewIntVar(0, len(self.pod_vars), 'count')
-
-            relevant_indicators = []
-            for p, v in self.pod_vars.items():
-                # Get indicator for this month
-                # Check Filter
-                is_match = True
-                if filter_node:
-                    # Eval filter for SINGLE pod context
-                    # This is expensive. We need a way to eval boolean logic per pod.
-                    # Hack: _eval returns list of values for current context.
-                    # We need to switch context to single pod.
-                    sub_ctx = {'pods': [p], 'vars': {}}
-                    res = self._eval(filter_node, sub_ctx)
-                    # res should be a BoolVar or Const
-                    if hasattr(res, 'Index'):
-                        # It's a BoolVar. We need to AND it with month indicator
-                        pass # Complex
-                    else:
-                        # Python bool
-                        if not res: is_match = False
-
-                if is_match:
-                    ind = self.pod_month_indicators.get((p, m_idx))
-                    if ind: relevant_indicators.append(ind)
-
-            self.model.Add(count_var == sum(relevant_indicators))
-            return count_var
+            return self._eval_all_same(args, context)
 
         if func == 'SUM':
-            # Sum of a list of variables or values
-            args = node.get('arguments', []) # usually column name
-            # _eval(column) returns list of values
-            # If we sum(AssignedMonth), we sum IntVars
-            vals = self._eval(args[0], context) # List
-            if vals and hasattr(vals[0], 'Index'):
-                return sum(vals) # CP-SAT sum
-            return sum(vals)
+            # Sum of list
+            # Flatten if args[0] resulted in a list of lists?
+            vals = self._eval(args[0], context)
+
+            # Ensure vals is a flat list of numbers
+            if isinstance(vals, list):
+                # Filter out None or non-summable?
+                # Or assume they are summable.
+                # If they are strings, we try to float them.
+                clean_vals = []
+                for v in vals:
+                    if isinstance(v, list): continue # Should not happen unless nested vars
+                    try:
+                        clean_vals.append(float(v))
+                    except:
+                        # If variable (IntVar), keep it
+                        if hasattr(v, 'Index'):
+                            clean_vals.append(v)
+                        else:
+                            clean_vals.append(0) # Default for bad data?
+
+                return sum(clean_vals)
+            return vals
+
+        if func == 'COUNT':
+            vals = self._eval(args[0], context)
+            if isinstance(vals, list): return len(vals)
+            return 1
 
         return None
+
+    def _eval_capacity_function(self, func, args, context):
+        m_idx = self._eval(args[0], context)
+        col_name = args[1]
+        filter_node = args[2] if len(args) > 2 else None
+
+        target_pods = context['pods']
+        sum_terms = []
+
+        for p in target_pods:
+            condition_vars = []
+
+            if filter_node:
+                sub_ctx = {'pods': [p], 'vars': {}}
+                res = self._eval(filter_node, sub_ctx)
+                if isinstance(res, bool):
+                    if not res: continue
+                elif hasattr(res, 'Index'):
+                    condition_vars.append(res)
+                else:
+                    # If res is None or unknown type, skip
+                    continue
+
+            if isinstance(m_idx, int):
+                ind = self.pod_month_indicators.get((p, m_idx))
+                if ind is not None:
+                    condition_vars.append(ind)
+                else:
+                    continue
+            else:
+                logger.warning("Variable month index in capacity constraint not supported yet.")
+                continue
+
+            if not condition_vars:
+                continue
+
+            if len(condition_vars) == 1:
+                active_var = condition_vars[0]
+            else:
+                active_var = self.model.NewBoolVar(f"active_{p}_{col_name}_{m_idx}")
+                self.model.AddBoolAnd(condition_vars).OnlyEnforceIf(active_var)
+                self.model.AddBoolOr([v.Not() for v in condition_vars]).OnlyEnforceIf(active_var.Not())
+
+            if func == 'GET_POD_COUNT_FOR_MONTH':
+                val = 1
+            else:
+                val = self.pod_map[p].get(col_name, 0)
+                try:
+                    # CP-SAT only supports integers.
+                    # We cast float to int. (Rounding or Truncating).
+                    # For now, standard int() cast.
+                    val = int(float(val))
+                except: val = 0
+
+            if val == 0: continue
+            sum_terms.append(active_var * val)
+
+        return sum(sum_terms)
+
+    def _eval_all_same(self, args, context):
+        target_var = args[0] if len(args) > 0 else "AssignedMonth"
+        values = self._eval({'variable': target_var}, context)
+
+        if not values or len(values) < 2:
+            return self.model.NewConstant(1)
+
+        if not hasattr(values[0], 'Index'):
+            first = values[0]
+            return self.model.NewConstant(1 if all(v == first for v in values) else 0)
+
+        all_same = self.model.NewBoolVar('all_same')
+        first = values[0]
+        bools = []
+        for other in values[1:]:
+            b = self.model.NewBoolVar(f'eq_{first.Name()}_{other.Name()}')
+            self.model.Add(first == other).OnlyEnforceIf(b)
+            self.model.Add(first != other).OnlyEnforceIf(b.Not())
+            bools.append(b)
+
+        self.model.AddBoolAnd(bools).OnlyEnforceIf(all_same)
+        self.model.AddBoolOr([b.Not() for b in bools]).OnlyEnforceIf(all_same.Not())
+
+        return all_same
 
     def _eval_operator(self, node, context):
         op = node['operator']
         operands = node.get('operands', [])
 
-        # Lazy Eval for special operators? No, eager for now.
-        left = self._eval(operands[0], context)
-        right = self._eval(operands[1], context) if len(operands) > 1 else None
+        left_raw = self._eval(operands[0], context)
+        right_raw = self._eval(operands[1], context) if len(operands) > 1 else None
 
-        # Helper for Lists (Context has multiple pods)
-        # If LHS is list [v1, v2] and RHS is scalar X.
-        # "==" -> Are ALL v == X?
-        # For now, let's assume operators handle lists by broadcasting or aggregating logic.
+        if op in ['==', '!=', '<', '<=', '>', '>=']:
+            return self._apply_comparison(op, left_raw, right_raw)
 
-        if op == '==':
-            # Case 1: Variable List vs Scalar
-            if isinstance(left, list) and not isinstance(right, list):
-                # E.g. [AssignedMonth_1, AssignedMonth_2] == 12
-                # Result is BoolVar (True if ALL match)
-                bools = []
-                for item in left:
-                    if hasattr(item, 'Index'):
-                        b = self.model.NewBoolVar('')
-                        self.model.Add(item == right).OnlyEnforceIf(b)
-                        self.model.Add(item != right).OnlyEnforceIf(b.Not())
-                        bools.append(b)
-                    else:
-                        return self.model.NewConstant(1 if item == right else 0)
-
-                res = self.model.NewBoolVar('')
-                self.model.AddBoolAnd(bools).OnlyEnforceIf(res)
-                self.model.AddBoolOr([b.Not() for b in bools]).OnlyEnforceIf(res.Not())
-                return res
-
-            # Case 2: Scalar vs Scalar
-            if hasattr(left, 'Index') or hasattr(right, 'Index'):
-                b = self.model.NewBoolVar('')
-                self.model.Add(left == right).OnlyEnforceIf(b)
-                self.model.Add(left != right).OnlyEnforceIf(b.Not())
-                return b
-            else:
-                return self.model.NewConstant(1 if left == right else 0)
-
-        if op == 'IMPLIES':
-            # Result is BoolVar: Left -> Right
-            # Left and Right must be BoolVars (or castable)
-            res = self.model.NewBoolVar('')
-            self.model.AddImplication(left, right).OnlyEnforceIf(res)
-            # Reverse: if !res, then Left=1 and Right=0
-            self.model.AddBoolAnd([left, right.Not()]).OnlyEnforceIf(res.Not())
-            return res
+        if op == 'IN':
+            return self._apply_in(left_raw, right_raw)
 
         if op == 'AND':
-            # Operands is list of bools
-            res = self.model.NewBoolVar('')
-            # Need to handle >2 operands if `operands` list is passed
-            # Re-eval all operands if > 2
-            # Here we assumed binary `left, right` above.
-            # Fix: `AND` takes list.
             ops = [self._eval(x, context) for x in operands]
-            self.model.AddBoolAnd(ops).OnlyEnforceIf(res)
-            self.model.AddBoolOr([o.Not() for o in ops]).OnlyEnforceIf(res.Not())
-            return res
+            return self._apply_logic_gate('AND', ops)
 
-        if op == '<=':
-            if hasattr(left, 'Index') or hasattr(right, 'Index'):
-                b = self.model.NewBoolVar('')
-                self.model.Add(left <= right).OnlyEnforceIf(b)
-                self.model.Add(left > right).OnlyEnforceIf(b.Not())
-                return b
-            return self.model.NewConstant(1 if left <= right else 0)
+        if op == 'OR':
+            ops = [self._eval(x, context) for x in operands]
+            return self._apply_logic_gate('OR', ops)
 
-        if op == '>=':
-            if hasattr(left, 'Index') or hasattr(right, 'Index'):
-                b = self.model.NewBoolVar('')
-                self.model.Add(left >= right).OnlyEnforceIf(b)
-                self.model.Add(left < right).OnlyEnforceIf(b.Not())
-                return b
-            return self.model.NewConstant(1 if left >= right else 0)
+        if op == 'NOT':
+            val = self._eval(operands[0], context)
+            return self._apply_not(val)
+
+        if op == 'IMPLIES':
+            return self._apply_implies(left_raw, right_raw)
 
         return None
+
+    def _apply_comparison(self, op, left, right):
+        if isinstance(left, list) and not isinstance(right, list):
+            bools = [self._apply_scalar_comparison(op, l, right) for l in left]
+            return self._apply_logic_gate('AND', bools)
+
+        if not isinstance(left, list) and isinstance(right, list):
+            bools = [self._apply_scalar_comparison(op, left, r) for r in right]
+            return self._apply_logic_gate('AND', bools)
+
+        if isinstance(left, list) and isinstance(right, list):
+            if len(left) != len(right): return self.model.NewConstant(0)
+            bools = [self._apply_scalar_comparison(op, l, r) for l, r in zip(left, right)]
+            return self._apply_logic_gate('AND', bools)
+
+        return self._apply_scalar_comparison(op, left, right)
+
+    def _apply_scalar_comparison(self, op, left, right):
+        # Force numeric comparison if strings are passed but look like numbers
+        if isinstance(left, str) and isinstance(right, (int, float)):
+             try: left = float(left)
+             except: pass
+        if isinstance(right, str) and isinstance(left, (int, float)):
+             try: right = float(right)
+             except: pass
+
+        # Check for primitive types (static evaluation)
+        # Note: numpy types might need special handling, but usually behave like primitives
+        is_left_static = isinstance(left, (int, float, str, bool)) or left is None
+        is_right_static = isinstance(right, (int, float, str, bool)) or right is None
+
+        if is_left_static and is_right_static:
+            try:
+                if op == '==': res = (left == right)
+                elif op == '!=': res = (left != right)
+                elif op == '<': res = (left < right)
+                elif op == '<=': res = (left <= right)
+                elif op == '>': res = (left > right)
+                elif op == '>=': res = (left >= right)
+                else: res = False
+            except TypeError:
+                # Comparison not supported (e.g. str < int), return False
+                res = False
+            return self.model.NewConstant(1 if res else 0)
+
+        # Dynamic Evaluation (CP-SAT)
+        b = self.model.NewBoolVar(f'cmp_{op}')
+        if op == '==':
+            self.model.Add(left == right).OnlyEnforceIf(b)
+            self.model.Add(left != right).OnlyEnforceIf(b.Not())
+        elif op == '!=':
+            self.model.Add(left != right).OnlyEnforceIf(b)
+            self.model.Add(left == right).OnlyEnforceIf(b.Not())
+        elif op == '<':
+            self.model.Add(left < right).OnlyEnforceIf(b)
+            self.model.Add(left >= right).OnlyEnforceIf(b.Not())
+        elif op == '<=':
+            self.model.Add(left <= right).OnlyEnforceIf(b)
+            self.model.Add(left > right).OnlyEnforceIf(b.Not())
+        elif op == '>':
+            self.model.Add(left > right).OnlyEnforceIf(b)
+            self.model.Add(left <= right).OnlyEnforceIf(b.Not())
+        elif op == '>=':
+            self.model.Add(left >= right).OnlyEnforceIf(b)
+            self.model.Add(left < right).OnlyEnforceIf(b.Not())
+
+        return b
+
+    def _apply_in(self, left, right_list):
+        if not isinstance(right_list, list): return self.model.NewConstant(0)
+
+        if isinstance(left, list):
+            bools = [self._apply_in(l, right_list) for l in left]
+            return self._apply_logic_gate('AND', bools)
+
+        # If left is dynamic (IntVar or LinearExpr) and right_list is static constants
+        is_left_static = isinstance(left, (int, float, str, bool)) or left is None
+
+        if not is_left_static:
+            # Check if right list is all static
+            if all((isinstance(r, (int, float, str, bool)) or r is None) for r in right_list):
+                # Use allowed assignments or simple OR
+                bools = []
+                for r in right_list:
+                    bools.append(self._apply_scalar_comparison('==', left, r))
+                return self._apply_logic_gate('OR', bools)
+
+        # Fallback (Generic loop)
+        bools = [self._apply_scalar_comparison('==', left, r) for r in right_list]
+        return self._apply_logic_gate('OR', bools)
+
+    def _apply_logic_gate(self, gate, bools):
+        filtered_bools = []
+        for b in bools:
+            if not hasattr(b, 'Index'):
+                if gate == 'AND' and not b: return self.model.NewConstant(0)
+                if gate == 'OR' and b: return self.model.NewConstant(1)
+            else:
+                filtered_bools.append(b)
+
+        if not filtered_bools:
+            return self.model.NewConstant(1 if gate == 'AND' else 0)
+
+        res = self.model.NewBoolVar(f'gate_{gate}')
+        if gate == 'AND':
+            self.model.AddBoolAnd(filtered_bools).OnlyEnforceIf(res)
+            self.model.AddBoolOr([b.Not() for b in filtered_bools]).OnlyEnforceIf(res.Not())
+        elif gate == 'OR':
+            self.model.AddBoolOr(filtered_bools).OnlyEnforceIf(res)
+            self.model.AddBoolAnd([b.Not() for b in filtered_bools]).OnlyEnforceIf(res.Not())
+
+        return res
+
+    def _apply_not(self, val):
+        if hasattr(val, 'Index'):
+            return val.Not()
+        return self.model.NewConstant(0 if val else 1)
+
+    def _apply_implies(self, left, right):
+        not_a = self._apply_not(left)
+        return self._apply_logic_gate('OR', [not_a, right])
 
     def _extract_schedule(self, solver):
         data = []

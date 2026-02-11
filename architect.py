@@ -56,23 +56,18 @@ class GenericArchitect:
            - Args: ["count" OR "COLUMN_NAME", Filter_Expression_OR_null]
         4. **Scope** (Grouping):
            - If user says "Per Exadata" or "Per Region", use "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["Exadata_Name"] }}
+           - The Scope runs the logic for EACH group separately.
 
         ### ADVANCED SOLVER FUNCTIONS (Use these for specific logic)
-        The Solver explicitly supports these high-level functions. Prefer them over complex primitives where possible:
         1. **Cohesion / Grouping**:
            - Function: `ALL_MEMBERS_HAVE_SAME_VALUE`
-           - Usage: Ensure all items in a group share the same AssignedMonth.
-           - Example: {{ "function": "ALL_MEMBERS_HAVE_SAME_VALUE", "arguments": [{{ "group_by": "FAMILY_NAME" }}, "AssignedMonth"] }}
+           - Arguments: ["AssignedMonth"]
+           - Requirement: Must be used with a `scope` that defines the group (e.g. Scope: For Each Family).
 
-        2. **Global Capacity / Ramp-up**:
-           - Function: `GET_POD_COUNT_FOR_MONTH`
-           - Usage: Check total capacity in a specific month.
-           - Example: {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [15] }} <= 500
-
-        3. **Iterative Logic**:
-           - Key: `for_each_month`
-           - Usage: Apply a rule to every month in the horizon.
-           - Example: {{ "for_each_month": {{}}, "rule": {{ "operator": "IMPLIES", "operands": [ {{ "operator": "==", "operands": [ {{ "variable": "CURRENT_MONTH" }}, 12 ] }}, ... ] }} }}
+        2. **Capacity / Ramp-up**:
+           - Function: `GET_SUM_FOR_MONTH` or `GET_POD_COUNT_FOR_MONTH`
+           - Arguments: [MonthIndex, ColumnName (or "count"), OptionalFilter]
+           - Example: {{ "function": "GET_SUM_FOR_MONTH", "arguments": [15, "DB_SIZE"] }}
 
         ### STRICT JSON OUTPUT FORMAT
         {{
@@ -93,12 +88,16 @@ class GenericArchitect:
         {{
           "rule_type": "db_size_start_months",
           "params": {{
+            "scope": {{ "type": "GLOBAL" }},
             "expression": {{
               "operator": "IMPLIES",
               "operands": [
                 {{
-                  "operator": "==",
-                  "operands": [ {{ "variable": "DB_SIZE" }}, ">1.5TB & <3TB" ]
+                  "operator": "AND",
+                  "operands": [
+                     {{ "operator": ">=", "operands": [ {{ "variable": "DB_SIZE" }}, 1500 ] }},
+                     {{ "operator": "<", "operands": [ {{ "variable": "DB_SIZE" }}, 3000 ] }}
+                  ]
                 }},
                 {{
                   "operator": ">=",
@@ -109,31 +108,29 @@ class GenericArchitect:
           }}
         }}
 
-        Example 2: "Limit pods to 200 per Exadata per month"
+        Example 2: "Limit pods to 200 per Exadata per month" (Use Loop or Generate for Month 1)
         {{
-          "rule_type": "group_concurrency_limit",
+          "rule_type": "group_concurrency_limit_m1",
           "params": {{
-            "limit": 200,
-            "group_columns": ["Exadata Name"]
+            "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["Exadata Name"] }},
+            "expression": {{
+                "operator": "<=",
+                "operands": [
+                    {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [1, "count"] }},
+                    200
+                ]
+            }}
           }}
         }}
 
-        Example 3: "All pods in a 'single_cohort' family must move together in the same month"
+        Example 3: "All pods in a Family must move together"
         {{
-          "rule_type": "single_cohort_cohesion",
+          "rule_type": "family_cohesion",
           "params": {{
+            "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["FAMILY_NAME"] }},
             "expression": {{
-              "operator": "IMPLIES",
-              "operands": [
-                {{ "operator": "==", "operands": [{{ "variable": "TypeF" }}, "single_cohort"] }},
-                {{
-                   "function": "ALL_MEMBERS_HAVE_SAME_VALUE",
-                   "arguments": [
-                     {{ "group_by": "FAMILY_NAME" }},
-                     "AssignedMonth"
-                   ]
-                }}
-              ]
+               "function": "ALL_MEMBERS_HAVE_SAME_VALUE",
+               "arguments": ["AssignedMonth"]
             }}
           }}
         }}
@@ -142,10 +139,11 @@ class GenericArchitect:
         {{
           "rule_type": "capacity_limit_m15",
           "params": {{
+            "scope": {{ "type": "GLOBAL" }},
             "expression": {{
               "operator": "<=",
               "operands": [
-                {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [15] }},
+                {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [15, "count"] }},
                 500
               ]
             }}
