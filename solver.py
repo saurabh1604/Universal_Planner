@@ -122,10 +122,14 @@ class SchedulingSolver:
         iterator = params.get('iterator')
         if iterator:
             var_name = iterator.get('variable', 'i')
-            start, end = iterator.get('range', [1, 1])
-            # If range is dynamic (string), parse it? Assuming list of ints for now.
-            if isinstance(iterator.get('range'), str) and iterator['range'] == 'ALL_MONTHS':
+            rng = iterator.get('range', [1, 1])
+
+            if isinstance(rng, str) and rng == 'ALL_MONTHS':
                 start, end = self._get_horizon()
+            elif isinstance(rng, list) and len(rng) == 2:
+                start, end = rng
+            else:
+                start, end = 1, 1 # Fallback
 
             for i in range(start, end + 1):
                 self._apply_inner(
@@ -496,6 +500,9 @@ class SchedulingSolver:
     def _eval_capacity_function(self, func, args, context):
         m_idx = self._eval(args[0], context)
         col_name = args[1]
+        filter_node = args[2] if len(args) > 2 else None
+
+        target_pods = context['pods']
         sum_terms = []
 
         for p in target_pods:
