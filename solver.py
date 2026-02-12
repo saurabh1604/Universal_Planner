@@ -587,6 +587,23 @@ class SchedulingSolver:
         if op == 'IN':
             return self._apply_in(left_raw, right_raw)
 
+        if op == 'SUM':
+            # Evaluate all operands and sum them up
+            ops = [self._eval(x, context) for x in operands]
+            # Filter None
+            valid_ops = [x for x in ops if x is not None]
+            # Flatten lists if any operand is a list?
+            # sum() handles ints and LinearExprs. If list, sum([list]) fails.
+            # Assuming operands are scalar expressions.
+            # If operand is list (broadcasting), we likely want Sum(List).
+            final_ops = []
+            for x in valid_ops:
+                if isinstance(x, list): final_ops.extend(x)
+                else: final_ops.append(x)
+
+            if not final_ops: return 0
+            return sum(final_ops)
+
         if op in ['+', '-', '*', '/', '%']:
             return self._apply_arithmetic(op, left_raw, right_raw)
 
