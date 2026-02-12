@@ -7,6 +7,8 @@ from auditor import Auditor
 from solver import SchedulingSolver
 import json
 import os
+import io
+import logging
 from datetime import date
 
 # --- HARDCODED CONFIGURATION ---
@@ -173,27 +175,47 @@ if 'df' in st.session_state:
             st.warning("No constraints to solve!")
         else:
             with st.spinner("Optimizing Schedule..."):
-                # Prepare Plan JSON
-                plan_json = {
-                    "global_parameters": {
-                        "total_duration_months": 48,
-                        "start_month_index": 1
-                    },
-                    "constraints": st.session_state.constraints
-                }
+                # Setup Logging Capture
+                log_stream = io.StringIO()
+                handler = logging.StreamHandler(log_stream)
+                logger = logging.getLogger()
+                logger.setLevel(logging.INFO)
+                logger.addHandler(handler)
 
-                # Convert DF to list of dicts
-                pod_data = st.session_state.df.to_dict('records')
+                try:
+                    # Prepare Plan JSON
+                    plan_json = {
+                        "global_parameters": {
+                            "total_duration_months": 48,
+                            "start_month_index": 1
+                        },
+                        "constraints": st.session_state.constraints
+                    }
 
-                # Solve
-                solver = SchedulingSolver(pod_data, plan_json)
-                result_df = solver.solve()
+                    # Convert DF to list of dicts
+                    pod_data = st.session_state.df.to_dict('records')
 
-                if result_df is not None:
-                    st.session_state.result_df = result_df
-                    st.success(f"Schedule Generated! ({len(result_df)} assignments)")
-                else:
-                    st.error("No Feasible Solution Found.")
+                    # Solve
+                    solver = SchedulingSolver(pod_data, plan_json)
+                    result_df = solver.solve()
+
+                    if result_df is not None:
+                        st.session_state.result_df = result_df
+                        st.success(f"Schedule Generated! ({len(result_df)} assignments)")
+                    else:
+                        st.error("No Feasible Solution Found.")
+
+                except Exception as e:
+                    st.error(f"Solver Error: {str(e)}")
+
+                finally:
+                    logger.removeHandler(handler)
+                    st.session_state.solver_logs = log_stream.getvalue()
+
+    # Display Logs
+    if 'solver_logs' in st.session_state:
+        with st.expander("View Solver Logs", expanded=False):
+            st.text(st.session_state.solver_logs)
 
     # Display Result
     if 'result_df' in st.session_state:

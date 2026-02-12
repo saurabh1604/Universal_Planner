@@ -63,13 +63,7 @@ class SchedulingSolver:
                 v = self.model.NewIntVar(start_month, max_month, f"month_{pod_name}")
                 self.pod_vars[pod_name] = v
 
-                # Create boolean indicators for each month (needed for capacity constraints)
-                for m in range(start_month, max_month + 1):
-                    b = self.model.NewBoolVar(f"ind_{pod_name}_{m}")
-                    # b <=> (v == m)
-                    self.model.Add(v == m).OnlyEnforceIf(b)
-                    self.model.Add(v != m).OnlyEnforceIf(b.Not())
-                    self.pod_month_indicators[(pod_name, m)] = b
+                # Indicators are created lazily via _get_indicator
 
         # 2. Apply Constraints (Universal Interpreter)
         logger.info(f"Engine: Applying {len(self.constraints)} Universal CDL Constraints...")
@@ -98,7 +92,7 @@ class SchedulingSolver:
 
         # 4. Solve
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = 30
+        solver.parameters.max_time_in_seconds = 60 # Increased for larger datasets
         status = solver.Solve(self.model)
 
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -520,7 +514,7 @@ class SchedulingSolver:
                     continue
 
             if isinstance(m_idx, int):
-                ind = self.pod_month_indicators.get((p, m_idx))
+                ind = self._get_indicator(p, m_idx)
                 if ind is not None:
                     condition_vars.append(ind)
                 else:
@@ -804,6 +798,20 @@ class SchedulingSolver:
     def _apply_implies(self, left, right):
         not_a = self._apply_not(left)
         return self._apply_logic_gate('OR', [not_a, right])
+
+    def _get_indicator(self, pod_name, month):
+        """Lazy creation of pod-month indicators."""
+        if (pod_name, month) in self.pod_month_indicators:
+            return self.pod_month_indicators[(pod_name, month)]
+
+        if pod_name not in self.pod_vars: return None
+
+        v = self.pod_vars[pod_name]
+        b = self.model.NewBoolVar(f"ind_{pod_name}_{month}")
+        self.model.Add(v == month).OnlyEnforceIf(b)
+        self.model.Add(v != month).OnlyEnforceIf(b.Not())
+        self.pod_month_indicators[(pod_name, month)] = b
+        return b
 
     def _extract_schedule(self, solver):
         data = []
