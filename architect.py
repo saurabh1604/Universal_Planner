@@ -100,22 +100,7 @@ class GenericArchitect:
 
         ### FEW-SHOT EXAMPLES (LEARN THE STRUCTURE)
 
-        Example 1: "Prioritize small families (Size < 2TB) to start early"
-        {{
-          "rule_type": "prioritize_small_families",
-          "params": {{
-            "type": "OBJECTIVE",
-            "action": "MINIMIZE",
-            "weight": 100,
-            "scope": {{
-                "type": "GLOBAL",
-                "filter": {{ "operator": "<", "operands": [ {{ "variable": "DB_SIZE" }}, 2000 ] }}
-            }},
-            "expression": {{ "variable": "AssignedMonth" }}
-          }}
-        }}
-
-        Example 2: "Limit pods to 200 per Exadata per month"
+        Example 1: "Limit pods to 200 per Exadata per month"
         {{
           "rule_type": "group_concurrency_limit",
           "params": {{
@@ -130,36 +115,43 @@ class GenericArchitect:
             }}
           }}
         }}
+        (Note: The Scope handles the grouping. Do NOT add a filter for "Exadata Name" inside GET_POD_COUNT_FOR_MONTH.)
 
-        Example 3: "Mixed Cohort: If Cohort C (Soak), must start in Month where (Month % 3 == 2)"
+        Example 2: "Limit max assigned pods per Region and Patching Slot to 250"
         {{
-          "rule_type": "mixed_cohort_soak_modulo",
+          "rule_type": "limit_region_slot_concurrency",
           "params": {{
+            "iterator": {{ "variable": "m", "range": "ALL_MONTHS" }},
+            "scope": {{ "type": "FOR_EACH_UNIQUE_COMBINATION", "columns": ["REGION", "Patching_Slots"] }},
             "expression": {{
-              "operator": "IMPLIES",
-              "operands": [
-                {{
-                  "operator": "AND",
-                  "operands": [
-                    {{ "operator": "==", "operands": [{{ "variable": "FACP_COHORT" }}, "Cohort C"] }},
-                    {{ "operator": "==", "operands": [{{ "variable": "Soak" }}, true] }}
-                  ]
-                }},
-                {{
-                   "operator": "==",
-                   "operands": [
-                      {{ "operator": "%", "operands": [{{ "variable": "AssignedMonth" }}, 3] }},
-                      2
-                   ]
-                }}
-              ]
+                "operator": "<=",
+                "operands": [
+                    {{ "function": "GET_POD_COUNT_FOR_MONTH", "arguments": [{{ "variable": "m" }}, "count"] }},
+                    250
+                ]
             }}
+          }}
+        }}
+
+        Example 3: "Prioritize small families (Size < 2TB) to start early"
+        {{
+          "rule_type": "prioritize_small_families",
+          "params": {{
+            "type": "OBJECTIVE",
+            "action": "MINIMIZE",
+            "weight": 100,
+            "scope": {{
+                "type": "GLOBAL",
+                "filter": {{ "operator": "<", "operands": [ {{ "variable": "DB_SIZE" }}, 2000 ] }}
+            }},
+            "expression": {{ "variable": "AssignedMonth" }}
           }}
         }}
 
         ### CRITICAL INSTRUCTIONS
         - Use `IMPLIES` for conditional logic.
         - Use `iterator` for "Per Month" constraints.
+        - When using `FOR_EACH_UNIQUE_COMBINATION`, do NOT add filters for the grouping columns. The Scope isolates the pods automatically.
         - Use `OBJECTIVE` type for priorities/preferences.
         - Calculate Month Indices relative to Plan Start Date.
 
