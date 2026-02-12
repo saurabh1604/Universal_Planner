@@ -321,6 +321,9 @@ class SchedulingSolver:
 
         if not isinstance(node, dict): return node
 
+        if 'iterator' in node:
+            return self._eval_iterator(node, context)
+
         if 'variable' in node:
             return self._eval_variable(node, context)
 
@@ -331,6 +334,33 @@ class SchedulingSolver:
             return self._eval_operator(node, context)
 
         return None
+
+    def _eval_iterator(self, node, context):
+        iterator = node['iterator']
+        var_name = iterator.get('variable', 'i')
+        rng = iterator.get('range', [1, 1])
+
+        if isinstance(rng, str) and rng == 'ALL_MONTHS':
+            start, end = self._get_horizon()
+        elif isinstance(rng, list) and len(rng) == 2:
+            start, end = rng
+        else:
+            start, end = 1, 1
+
+        results = []
+        inner_expr = node.get('expression')
+
+        for i in range(start, end + 1):
+            # Create sub-context with iterator variable
+            sub_ctx = context.copy()
+            sub_ctx['vars'] = context.get('vars', {}).copy()
+            sub_ctx['vars'][var_name] = i
+
+            # Recurse
+            res = self._eval(inner_expr, sub_ctx)
+            results.append(res)
+
+        return results
 
     def _eval_variable(self, node, context):
         var = node['variable']
