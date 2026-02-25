@@ -6,8 +6,9 @@ from auditor import Auditor
 import json
 import os
 
-# --- HARDCODED CONFIGURATION ---
-HARDCODED_API_KEY = "" 
+# --- CONFIGURATION ---
+# Try to get API key from Streamlit secrets, then environment variables
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
 
 st.set_page_config(layout="wide", page_title="Universal Planner Demo")
 
@@ -43,8 +44,8 @@ with st.sidebar:
             st.success("Schema Learned!")
 
     # Reload agents on every run to pick up config changes (like Mock Mode)
-    st.session_state.architect = GenericArchitect(HARDCODED_API_KEY, mock_mode=mock_mode)
-    st.session_state.auditor = Auditor(HARDCODED_API_KEY, mock_mode=mock_mode)
+    st.session_state.architect = GenericArchitect(OPENAI_API_KEY, mock_mode=mock_mode)
+    st.session_state.auditor = Auditor(OPENAI_API_KEY, mock_mode=mock_mode)
 
     st.divider()
     st.subheader("Active Constraints")
